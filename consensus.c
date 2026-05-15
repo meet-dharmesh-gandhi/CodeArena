@@ -82,6 +82,10 @@ void * senderThread(void * arg) {
 
     if (highestNumber == cs->randomNumber) {
         printf("[sender] I am the voted monitor!!\n");
+        char *args[] = {"./Monitor", NULL};
+        int didIt = execvp(args[0], args);
+        perror("execvp");
+        printf("Failed to become the monitor, sad life :(\n");
     } else {
         printf("[sender] I am not the voted monitor...\n");
     }
@@ -100,7 +104,6 @@ void * receiverThread(void * arg) {
     int cannotHear = 1;
     int canHear = 0;
     int sent = 0;
-    int monitorUID = -1;
     int highestRandomNumber = -1;
     int numberSet = 0;
     int electedUID = -1;
@@ -131,11 +134,6 @@ void * receiverThread(void * arg) {
                 printf("[receiver] received my own signal...\n");
                 sent++;
             }
-        } else if (cs->packetType == 4 && cs->uid != uid) {
-            printf("[receiver] received cancel...\n");
-            canHear++;
-            struct consensusCancel * cc = (struct consensusCancel *)cs;
-            monitorUID = cc->monitorUID;
         } else if (cs->packetType == 3 && cs->uid != uid) {
             printf("[receiver] received vote...\n");
             struct consensusVote * cv = (struct consensusVote *)cs;

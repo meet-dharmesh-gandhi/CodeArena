@@ -1,10 +1,16 @@
 #ifndef PACKETS_H
 #define PACKETS_H
 
+struct monitorData {
+    int ip;
+    int psiScore;
+};
+
 struct heartbeat {
     int packetType; // 1
     int nodeType;
     int uid;
+    struct monitorData md[0];
 };
 
 struct consensusStart {
@@ -25,8 +31,6 @@ struct consensusCancel {
     int packetType; // 4
     int nodeType;
     int uid;
-    int votedRandomNumber;
-    int monitorUID;
 };
 
 #endif

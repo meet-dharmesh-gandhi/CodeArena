@@ -6,8 +6,9 @@
 #include "heartbeats.h"
 
 # define NODE_HEARTBEAT_PORT 8000
-# define MONITOR_HEARTBEAT_PORT 8002
-# define NODE_COMMUNICATION_PORT 8001
+# define SEND_HEARTBEAT_PORT 8002
+# define GATEWAY_PORT 8003
+# define NODE_COMMUNICATION_PORT 8004
 
 int main(int argc, char const *argv[])
 {
@@ -17,10 +18,11 @@ int main(int argc, char const *argv[])
         printf("Random number generation error...\n");
         return 0;
     }
-    printf("random uid %d\n", uid);
+    printf("[Monitor] random uid %d\n", uid);
 
     int yes = 1;
     int level = SOL_SOCKET;
+    int capacity = 3;
     printf("OK 2\n");
     struct sock_options * option = malloc(sizeof(struct sock_options));
     printf("OK 3\n");
@@ -44,10 +46,11 @@ int main(int argc, char const *argv[])
     printf("OK 10\n");
     create_option(option, level, SO_RCVTIMEO, &tv, sizeof(tv));
     printf("OK 11\n");
-    int hbSender = create_socket(NODE_HEARTBEAT_PORT, 1, -1, sock_option);
-    int hbReceiver = create_socket(MONITOR_HEARTBEAT_PORT, 1, -1, sock_option);
+    int hbSender = create_socket(SEND_HEARTBEAT_PORT, 1, -1, sock_option);
+    int hbReceiver = create_socket(NODE_HEARTBEAT_PORT, 1, -1, sock_option);
     int communication = create_socket(NODE_COMMUNICATION_PORT, 1, -1, sock_option);
-    if (hbSender < 0 || hbReceiver < 0 || communication < 0) {
+    int gateway = create_socket(GATEWAY_PORT, 1, -1, sock_option);
+    if (hbSender < 0 || hbReceiver < 0 || communication < 0 || gateway < 0) {
         printf("Could not get a socket...\n");
         return 0;
     }
@@ -56,18 +59,12 @@ int main(int argc, char const *argv[])
     struct arguments * args1 = malloc(sizeof(struct arguments));
     struct arguments * args2 = malloc(sizeof(struct arguments));
     struct heartbeat * hb = malloc(sizeof(struct heartbeat));
-    struct sockaddr_in * addr = malloc(sizeof(struct sockaddr_in));
-    int addrSet = 0;
-    hb->nodeType = 0;
+    hb->nodeType = 2;
     hb->packetType = 1;
     hb->uid = uid;
-    args1->port = NODE_HEARTBEAT_PORT;
+    args1->port = SEND_HEARTBEAT_PORT;
     args1->hb = hb;
-    args1->addr = addr;
-    args1->addrSet = &addrSet;
     args2->hb = hb;
-    args2->addr = addr;
-    args2->addrSet = &addrSet;
     printf("OK 12\n");
     args1->sin = hbSender;
     if (pthread_create(&sender, NULL, sendHeartbeats, args1) != 0) {
@@ -79,7 +76,7 @@ int main(int argc, char const *argv[])
         return 0;
     }
     args2->sin = hbReceiver;
-    if (pthread_create(&receiver, NULL, listenHeartbeats, args2) != 0) {
+    if (pthread_create(&receiver, NULL, analyseHeartbeats, args2) != 0) {
         perror("receiver thread");
         free(args1);
         free(args2);
