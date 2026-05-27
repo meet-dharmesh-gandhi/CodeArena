@@ -6,14 +6,11 @@
 #include "socket.h"
 #include "heartbeats.h"
 #include <arpa/inet.h>
+#include "constants.h"
+#include <time.h>
+#include <sys/time.h>
 
 #define port_number 8001
-
-struct args {
-    int uid;
-    int sin;
-    int* consensusRunning;
-};
 
 void * senderThread(void * arg) {
     printf("[sender] sending...\n");
@@ -22,10 +19,9 @@ void * senderThread(void * arg) {
     int sin = args->sin;
     int* consensusRunning = args->consensusRunning;
 
-    // step 1, send out a consensusStart signal
     struct consensusStart * cs = malloc(sizeof(struct consensusStart));
-    cs->packetType = 2;
-    cs->nodeType = 0;
+    cs->packetType = CONSENSUS_START;
+    cs->nodeType = EMPTY_NODE;
     cs->randomNumber = getUID();
     if (cs->randomNumber == -1) {
         printf("[sender] Invalid random number generated...\n");
@@ -41,11 +37,11 @@ void * senderThread(void * arg) {
     int addrSize = sizeof(struct sockaddr_in);
 
     printf("[sender] ready to send start signal...\n");
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < NODE_TRIES; i++) {
         // send the packet thrice
         sendto(sin, cs, sizeof(struct consensusStart), 0, (struct sockaddr *)&addr, addrSize);
         printf("[sender] Packet %d sent\n", i);
-        usleep(500000); // 500 millisecond sleep
+        usleep(U_HEARTBEAT); // 500 millisecond sleep
     }
 
     memset(&addr, 0, sizeof(addr));
@@ -62,7 +58,7 @@ void * senderThread(void * arg) {
             continue;
         }
 
-        if (cv->packetType == 3) {
+        if (cv->packetType == CONSENSUS_VOTE) {
             printf("[sender] received votee %d %d %d...\n", highestNumber, cv->votedRandomNumber, numberSet);
             if (highestNumber < cv->votedRandomNumber || numberSet == 0) {
                 highestNumber = cv->votedRandomNumber;
@@ -73,19 +69,19 @@ void * senderThread(void * arg) {
             }
         }
 
-        if (sent == 3) {
+        if (sent == NODE_TRIES) {
             break;
         }
     }
 
-    printf("highestNumber: %d, myNumber: %d\n", highestNumber, cs->randomNumber);
+    printf("[sender] highestNumber: %d, myNumber: %d\n", highestNumber, cs->randomNumber);
 
     if (highestNumber == cs->randomNumber) {
         printf("[sender] I am the voted monitor!!\n");
         char *args[] = {"./Monitor", NULL};
         int didIt = execvp(args[0], args);
-        perror("execvp");
-        printf("Failed to become the monitor, sad life :(\n");
+        perror("[sender] execvp");
+        printf("[sender] Failed to become the monitor, sad life :(\n");
     } else {
         printf("[sender] I am not the voted monitor...\n");
     }
@@ -117,8 +113,8 @@ void * receiverThread(void * arg) {
         int recved = recvfrom(sin, cs, sizeof(struct consensusStart), 0, (struct sockaddr *)&addr, &addrLen);
 
         if (recved < 0) {
-            perror("recvfrom");
-            usleep(500000);
+            perror("[receiver] recvfrom");
+            usleep(U_HEARTBEAT);
             continue;
         }
 
@@ -161,8 +157,8 @@ void * receiverThread(void * arg) {
     }
 
     struct consensusVote * cv = malloc(sizeof(struct consensusVote));
-    cv->nodeType = 0;
-    cv->packetType = 3;
+    cv->nodeType = EMPTY_NODE;
+    cv->packetType = CONSENSUS_VOTE;
     cv->uid = uid;
     cv->votedRandomNumber = highestRandomNumber;
 
@@ -176,7 +172,7 @@ void * receiverThread(void * arg) {
         // send the packet thrice
         sendto(sin, cv, sizeof(struct consensusVote), 0, (struct sockaddr *)&addr, addrLen);
         printf("[receiver] sent vote...\n");
-        usleep(500000); // 500 millisecond sleep
+        usleep(U_HEARTBEAT); // 500 millisecond sleep
     }
 }
 
@@ -203,11 +199,11 @@ void performConsensus(int uid, int* consensusRunning) {
     option = option->next;
     struct timeval tv;
     tv.tv_sec = 0;
-    tv.tv_usec = 100000; // 100 milliseconds
+    tv.tv_usec = U_CONSENSUS_TIMEOUT; // 100 milliseconds
     create_option(option, level, SO_RCVTIMEO, &tv, sizeof(tv));
     int sin = create_socket(port_number, 1, -1, sock_option);
     if (sin < 0) {
-        printf("[performing consensus] Could not get a socket...\n");
+        printf("[performConsensus] Could not get a socket...\n");
         return;
     }
 
@@ -216,7 +212,169 @@ void performConsensus(int uid, int* consensusRunning) {
     args->uid = uid;
     args->consensusRunning = consensusRunning;
 
-    printf("[performing consensus] creating threads...\n");
+    printf("[performConsensus] creating threads...\n");
     pthread_create(&thread_a, NULL, senderThread, args);
     pthread_create(&thread_b, NULL, receiverThread, args);
+}
+
+struct firstSyncArgs {
+    int * done;
+    int sin;
+    struct timeval * tv;
+};
+
+void getBroadcastAddr(struct sockaddr_in * addr) {
+    memset(addr, 0, sizeof(struct sockaddr_in));
+    addr->sin_addr.s_addr = inet_addr("255.255.255.255");
+    addr->sin_port = htons(port_number);
+    addr->sin_family = AF_INET;
+}
+
+void * waitForFirstSync(void * args) {
+    struct firstSyncArgs * syncArgs = (struct firstSyncArgs *)args;
+    int * done = syncArgs->done;
+    int sin = syncArgs->sin;
+    struct timeval * tv = syncArgs->tv;
+    struct monitorSync * ms = malloc(sizeof(struct monitorSync));
+    struct sockaddr * addr;
+    int size = sizeof(struct sockaddr);
+
+    printf("[waitForFirstSync] Starting while...\n");
+    while (1) {
+        int recved = recvfrom(sin, ms, sizeof(struct monitorSync), 0, (struct sockaddr *)addr, &size);
+
+        if (recved > 0 && ms->packetType == MONITOR_SYNC) {
+            printf("[waitForFirstSync] received sync packet...\n");
+            *done = 1;
+            if (gettimeofday(tv, NULL) == 0)
+                break;
+        }
+
+        pthread_testcancel();
+    }
+}
+
+void * syncMonitors(void * args) {
+    struct monitorArgs * mArgs = (struct monitorArgs *)args;
+    int * nodes = mArgs->nodes;
+    int sin = mArgs->sin;
+    int uid = mArgs->uid;
+
+    // wait for first monitor sync, for 10 heartbeats
+    printf(GRN "[syncMonitors]" RST " Syncing monitors...\n");
+    pthread_t syncThread;
+    struct timeval * tv = malloc(sizeof(struct timeval));
+    tv->tv_sec = 0;
+    tv->tv_usec = 0;
+    struct firstSyncArgs * syncArgs = malloc(sizeof(struct firstSyncArgs));
+    int done = 0;
+    syncArgs->sin = sin;
+    syncArgs->done = &done;
+    syncArgs->tv = tv;
+    pthread_create(&syncThread, NULL, waitForFirstSync, syncArgs);
+    usleep(U_HEARTBEAT * 10);
+    pthread_cancel(syncThread);
+    printf(GRN "[syncMonitors]" RST " finished waiting...\n");
+    free(syncArgs);
+    printf(GRN "[syncMonitors]" RST " freed memory...\n");
+    if (done == 1) {
+        printf(GRN "[syncMonitors]" RST " monitors found, syncing clocks...\n");
+    }
+
+    struct sockaddr_in * addr = malloc(sizeof(struct sockaddr_in));
+    getBroadcastAddr(addr);
+
+    // sync every 5 heartbeats from now
+    struct monitorSync * ms = malloc(sizeof(struct monitorSync));
+    ms->packetType = MONITOR_SYNC;
+    ms->uid = uid;
+    // sleep a bit extra before the next sleep
+    printf(GRN "[syncMonitors]" RST " trying to sleep extra...\n");
+    if (!(tv->tv_usec == 0 && tv->tv_sec == 0)) {
+        struct timeval * orgtv = tv;
+        gettimeofday(tv, NULL);
+        long long secs = tv->tv_sec - orgtv->tv_sec;
+        long long usecs = tv->tv_usec - orgtv->tv_usec;
+        useconds_t timeToSleep = ((long long)(U_HEARTBEAT * 5)) - ((secs * 1000000LL) + usecs);
+        printf("before tts: %d, secs: %lld, usecs: %lld...\n", timeToSleep, secs, usecs);
+        usleep(timeToSleep);
+    }
+    printf(GRN "[syncMonitors]" RST " slept, now going in while...\n");
+    while (1) {
+        ms->gateways = nodes[0];
+        ms->monitors = nodes[1];
+        ms->assigners = nodes[2];
+        ms->workers = nodes[3];
+        ms->empty = nodes[4];
+        printf(GRN "[syncMonitors]" RST " nodes: %d %d %d %d %d\n", nodes[0], nodes[1], nodes[2], nodes[3], nodes[4]);
+        int sent = sendto(sin, ms, sizeof(struct monitorSync), 0, (struct sockaddr *)addr, sizeof(struct sockaddr_in));
+        usleep(U_HEARTBEAT * 5);
+    }
+}
+
+// this function needs a socket which has a timeout of exactly 1 hearbeat
+void * maintainTotal(void * args) {
+    struct maintainTotalArgs * mta = (struct maintainTotalArgs *)args;
+    int sin = mta->sin;
+    int * nodes = mta->nodes;
+    int myUID = mta->myUID;
+    struct monitorSync * ms = malloc(sizeof(struct monitorSync));
+    struct sockaddr_in * addr;
+    int size = sizeof(struct sockaddr_in);
+    printf(GRN "[maintainTotal]" RST " started...\n");
+    int tempNodes[TOTAL_NODES];
+    memset(&tempNodes, 0, sizeof(tempNodes));
+
+    while (1) {
+        printf(GRN "[maintainTotal]" RST " Recving...\n");
+        int recved = recvfrom(sin, ms, sizeof(struct monitorSync), 0, (struct sockaddr *)&addr, &size);
+        if (recved < 0) {
+            perror("recvfrom");
+            continue;
+        }
+
+        if (ms->packetType == MONITOR_SYNC) {
+            printf(GRN "[maintainTotal]" RST " syncing...\n");
+            tempNodes[0] += ms->gateways;
+            tempNodes[1] += ms->monitors;
+            tempNodes[2] += ms->assigners;
+            tempNodes[3] += ms->workers;
+            tempNodes[4] += ms->empty;
+        }
+
+        if (ms->uid == myUID) {
+            printf(GRN "[maintainTotal]" RST " copying %d %d %d %d %d...\n", tempNodes[0], tempNodes[1], tempNodes[2], tempNodes[3], tempNodes[4]);
+            memcpy(nodes, tempNodes, sizeof(tempNodes));
+            memset(&tempNodes, 0, 5 * sizeof(int));
+        }
+    }
+}
+
+void * checkValidNodes(void * args) {
+    struct checkValidNodesArgs * cvnArgs = (struct checkValidNodesArgs *)args;
+    struct node ** nodes = cvnArgs->nodes;
+    int * totalNodes = cvnArgs->totalNodes;
+    int maxTimeToKeep = U_HEARTBEAT * VALID_NODE;
+    printf("[checkValidNodes] started...\n");
+    struct timeval * tv = malloc(sizeof(struct timeval));
+    tv->tv_sec = 0;
+    tv->tv_usec = 0;
+
+    while (1) {
+        usleep(U_HEARTBEAT);
+        printf("[checkValidNodes] one heartbeat over...\n");
+        gettimeofday(tv, NULL);
+        long curTime = (tv->tv_sec * 1000000) + tv->tv_usec;
+        for (int i = 0; i < MONITOR_CAPACITY; i++) {
+            if (nodes[i] != NULL && nodes[i]->nodeType > -1 && nodes[i]->lastUpdated > 0) {
+                printf("curTime: %ld, lastUpdated: %ld, maxTimeToKeep: %d, curTime - maxTimeToKeep: %ld...\n", curTime, nodes[i]->lastUpdated, maxTimeToKeep, curTime - maxTimeToKeep);
+            }
+            if (nodes[i] != NULL && nodes[i]->nodeType > -1 && nodes[i]->lastUpdated > 0 && nodes[i]->lastUpdated < curTime - maxTimeToKeep) {
+                printf("[checkValidNodes] removing a node: %d %d...\n", nodes[i]->nodeType, nodes[i]->ip);
+                nodes[i]->nodeType = -1;
+                nodes[i]->lastUpdated = -1;
+                *totalNodes -= 1;
+            }
+        }
+    }
 }

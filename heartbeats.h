@@ -1,6 +1,7 @@
 #ifndef HEARTBEATS_H
 #define HEARTBEATS_H 1
 #include "packets.h"
+#include "constants.h"
 
 struct arguments {
     int sin;
@@ -8,17 +9,15 @@ struct arguments {
     struct heartbeat * hb;
     struct sockaddr_in * addr;
     int * addrSet;
+    struct node ** nodes;
+    int * totalNodes;
+    int monitor_capacity;
 };
 
-struct Nodes {
-    int ip;
-    int psiScore;
-    int nodeType;
-    struct Nodes * next;
-};
 
 /**
  * This function sends heartbeats and is to be called by a thread.
+ * This function is only valid for nodes apart from monitors.
  */
 void * sendHeartbeats(void * arg);
 
@@ -27,6 +26,12 @@ void * sendHeartbeats(void * arg);
  * This function is only valid for nodes apart from monitors.
  */
 void * listenHeartbeats(void * arg);
+
+/**
+ * This function sends heartbeats and is to be called by a thread.
+ * This function is only valid for monitor nodes.
+ */
+void * sendMonitorHeartbeats(void * arg);
 
 /**
  * This function listens for heartbeats of all other nodes and is to be called by a thread.

@@ -1,6 +1,8 @@
 #ifndef PACKETS_H
 #define PACKETS_H
 
+#include <time.h>
+
 struct monitorData {
     int ip;
     int psiScore;
@@ -10,7 +12,9 @@ struct heartbeat {
     int packetType; // 1
     int nodeType;
     int uid;
-    struct monitorData md[0];
+    int currentWork;
+    int monitorCapacity;
+    struct monitorData md[3];
 };
 
 struct consensusStart {
@@ -32,5 +36,25 @@ struct consensusCancel {
     int nodeType;
     int uid;
 };
+
+struct monitorSync {
+    int packetType; // 5
+    int uid;
+    int gateways;
+    int monitors;
+    int assigners;
+    int workers;
+    int empty;
+    int workerPSI[0];
+};
+
+
+struct node {
+    int nodeType;
+    time_t lastUpdated;
+    int ip;
+    int psiScore;
+};
+
 
 #endif

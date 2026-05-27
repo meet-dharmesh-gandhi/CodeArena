@@ -4,10 +4,7 @@
 #include <sys/socket.h>
 #include "socket.h"
 #include "heartbeats.h"
-
-# define NODE_HEARTBEAT_PORT 8000
-# define MONITOR_HEARTBEAT_PORT 8002
-# define NODE_COMMUNICATION_PORT 8001
+#include "constants.h"
 
 int main(int argc, char const *argv[])
 {
@@ -40,7 +37,7 @@ int main(int argc, char const *argv[])
     printf("OK 9\n");
     struct timeval tv;
     tv.tv_sec = 0;
-    tv.tv_usec = 500000; // 500 milliseconds
+    tv.tv_usec = U_HEARTBEAT; // 500 milliseconds
     printf("OK 10\n");
     create_option(option, level, SO_RCVTIMEO, &tv, sizeof(tv));
     printf("OK 11\n");
@@ -59,7 +56,7 @@ int main(int argc, char const *argv[])
     struct sockaddr_in * addr = malloc(sizeof(struct sockaddr_in));
     int addrSet = 0;
     hb->nodeType = 0;
-    hb->packetType = 1;
+    hb->packetType = HEARTBEAT;
     hb->uid = uid;
     args1->port = NODE_HEARTBEAT_PORT;
     args1->hb = hb;

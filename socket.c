@@ -9,6 +9,7 @@
 #include <signal.h>
 #include <errno.h>
 #include "socket.h"
+#include "constants.h"
 
 struct sock_options * create_option(struct sock_options * option, int level, int optname, void *optval, socklen_t optlen) {
     option->level = level;
@@ -21,15 +22,15 @@ struct sock_options * create_option(struct sock_options * option, int level, int
 
 int create_socket(int port_number, int waiting_queue, int sock_type, struct sock_options * sock_options) {
     if (port_number < 1024) {
-        port_number = 9000;
+        port_number = DEFAULT_PORT;
     }
 
     if (waiting_queue == 0) {
-        waiting_queue = 10;
+        waiting_queue = DEFAULT_WAITING_QUEUE;
     }
 
     if (sock_type == -1) {
-        sock_type = SOCK_DGRAM;
+        sock_type = DEFAULT_PROTOCOL;
     }
 
     if (sock_options == NULL) {

@@ -4,11 +4,9 @@
 #include <sys/socket.h>
 #include "socket.h"
 #include "heartbeats.h"
+#include "constants.h"
+#include "consensus.h"
 
-# define NODE_HEARTBEAT_PORT 8000
-# define SEND_HEARTBEAT_PORT 8002
-# define GATEWAY_PORT 8003
-# define NODE_COMMUNICATION_PORT 8004
 
 int main(int argc, char const *argv[])
 {
@@ -22,8 +20,11 @@ int main(int argc, char const *argv[])
 
     int yes = 1;
     int level = SOL_SOCKET;
-    int capacity = 3;
-    printf("OK 2\n");
+    int currNodes = 0;
+    struct node * nodeDetails[MONITOR_CAPACITY] = {NULL};
+    int totalNodes[TOTAL_NODES] = {0};
+    int systemNodes[TOTAL_NODES] = {0};
+    printf("OK 2 %d %d %d %d %d\n", totalNodes[0], totalNodes[1], totalNodes[2], totalNodes[3], totalNodes[4]);
     struct sock_options * option = malloc(sizeof(struct sock_options));
     printf("OK 3\n");
     struct sock_options * sock_option;
@@ -42,44 +43,102 @@ int main(int argc, char const *argv[])
     printf("OK 9\n");
     struct timeval tv;
     tv.tv_sec = 0;
-    tv.tv_usec = 500000; // 500 milliseconds
+    tv.tv_usec = U_HEARTBEAT;
     printf("OK 10\n");
     create_option(option, level, SO_RCVTIMEO, &tv, sizeof(tv));
     printf("OK 11\n");
     int hbSender = create_socket(SEND_HEARTBEAT_PORT, 1, -1, sock_option);
-    int hbReceiver = create_socket(NODE_HEARTBEAT_PORT, 1, -1, sock_option);
     int communication = create_socket(NODE_COMMUNICATION_PORT, 1, -1, sock_option);
     int gateway = create_socket(GATEWAY_PORT, 1, -1, sock_option);
+    option->next = malloc(sizeof(struct sock_options));
+    option = option->next;
+    create_option(option, IPPROTO_IP, IP_PKTINFO, &yes, sizeof(yes));
+    int hbReceiver = create_socket(MONITOR_LISTEN_HEARTBEAT_PORT, 1, -1, sock_option);
     if (hbSender < 0 || hbReceiver < 0 || communication < 0 || gateway < 0) {
         printf("Could not get a socket...\n");
         return 0;
     }
 
-    pthread_t sender, receiver;
+    pthread_t sender, receiver, syncThread, maintainTotalThread, checkValidNodesThread;
     struct arguments * args1 = malloc(sizeof(struct arguments));
     struct arguments * args2 = malloc(sizeof(struct arguments));
+    struct monitorArgs * mArgs = malloc(sizeof(struct monitorArgs));
+    struct maintainTotalArgs * mtArgs = malloc(sizeof(struct maintainTotalArgs));
+    struct checkValidNodesArgs * cvnArgs = malloc(sizeof(struct checkValidNodesArgs));
     struct heartbeat * hb = malloc(sizeof(struct heartbeat));
-    hb->nodeType = 2;
-    hb->packetType = 1;
+    hb->nodeType = MONITOR_NODE;
+    hb->packetType = HEARTBEAT;
     hb->uid = uid;
+
     args1->port = SEND_HEARTBEAT_PORT;
     args1->hb = hb;
-    args2->hb = hb;
-    printf("OK 12\n");
     args1->sin = hbSender;
-    if (pthread_create(&sender, NULL, sendHeartbeats, args1) != 0) {
+    args1->totalNodes = totalNodes;
+    args1->monitor_capacity = MONITOR_CAPACITY;
+    printf("OK 12\n");
+    if (pthread_create(&sender, NULL, sendMonitorHeartbeats, args1) != 0) {
         perror("sender thread");
         free(args1);
         free(args2);
+        free(mArgs);
+        free(mtArgs);
         free(hb);
         free(sock_option);
         return 0;
     }
+
     args2->sin = hbReceiver;
+    args2->hb = hb;
+    args2->nodes = nodeDetails;
+    args2->totalNodes = totalNodes;
+    args2->monitor_capacity = MONITOR_CAPACITY;
     if (pthread_create(&receiver, NULL, analyseHeartbeats, args2) != 0) {
         perror("receiver thread");
         free(args1);
         free(args2);
+        free(mArgs);
+        free(mtArgs);
+        free(hb);
+        free(sock_option);
+        return 0;
+    }
+
+    mArgs->sin = communication;
+    mArgs->uid = uid;
+    mArgs->nodes = totalNodes;
+    if (pthread_create(&syncThread, NULL, syncMonitors, mArgs) != 0) {
+        perror("communication thread");
+        free(args1);
+        free(args2);
+        free(mArgs);
+        free(mtArgs);
+        free(hb);
+        free(sock_option);
+        return 0;
+    }
+
+    mtArgs->sin = communication;
+    mtArgs->myUID = uid;
+    mtArgs->nodes = systemNodes;
+    if (pthread_create(&maintainTotalThread, NULL, maintainTotal, mtArgs) != 0) {
+        perror("communication thread - maintain total");
+        free(args1);
+        free(args2);
+        free(mArgs);
+        free(mtArgs);
+        free(hb);
+        free(sock_option);
+        return 0;
+    }
+
+    cvnArgs->nodes = nodeDetails;
+    cvnArgs->totalNodes = totalNodes;
+    if (pthread_create(&checkValidNodesThread, NULL, checkValidNodes, cvnArgs) != 0) {
+        perror("[Monitor] check valid nodes thread");
+        free(args1);
+        free(args2);
+        free(mArgs);
+        free(mtArgs);
         free(hb);
         free(sock_option);
         return 0;
@@ -91,6 +150,8 @@ int main(int argc, char const *argv[])
     printf("OK 1112\n");
     free(args1);
     free(args2);
+    free(mArgs);
+    free(mtArgs);
     free(hb);
     free(sock_option);
 
