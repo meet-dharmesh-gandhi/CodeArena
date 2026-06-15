@@ -2,6 +2,7 @@
 #define HEARTBEATS_H 1
 #include "packets.h"
 #include "constants.h"
+#include <stdint.h>
 
 struct arguments {
     int sin;
@@ -10,7 +11,7 @@ struct arguments {
     struct sockaddr_in * addr;
     int * addrSet;
     struct node ** nodes;
-    int * totalNodes;
+    struct nodeNames * totalNodes;
     int monitor_capacity;
 };
 

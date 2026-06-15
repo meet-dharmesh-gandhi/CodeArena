@@ -38,8 +38,6 @@
 
 #define NODE_TRIES 3
 
-#define TOTAL_NODES 5
-
 #define VALID_NODE 10
 
 #define DEFAULT_PORT 9000

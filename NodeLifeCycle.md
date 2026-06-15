@@ -17,6 +17,7 @@
 - Monitor nodes listen and send to gateway messages at 8501, unicast
 - Monitor nodes sync information every 5 heartbeats at port 8003, broadcast
 - Monitor nodes listen to node heartbeats on port 8500, unicast
+- Monitor nodes vote for spawing new nodes on port 8004, broadcast
 
 - Assigner nodes ask for monitors on port 8000, broadcast
 - Assigner nodes send heartbeats from port 8500, unicast

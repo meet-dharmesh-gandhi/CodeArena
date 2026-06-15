@@ -157,7 +157,7 @@ void * sendMonitorHeartbeats(void * arg) {
     int port = args.port;
     int capacity = args.monitor_capacity;
     if (capacity <= 0) capacity = MONITOR_CAPACITY;
-    int * totalNodes = args.totalNodes;
+    struct nodeNames * totalNodes = args.totalNodes;
     if (port == 0) {
         port = MONITOR_HEARTBEAT_PORT;
     }
@@ -182,8 +182,9 @@ void * sendMonitorHeartbeats(void * arg) {
         rdn = rdn % JITTER_MILLISECONDS; // 50 millisecond of random jitter
         usleep(U_HEARTBEAT + rdn); // 500 millisecond delay
         hb.currentWork = 0;
-        for (int i = 0; i < TOTAL_NODES; i++) {
-            hb.currentWork += totalNodes[i];
+        int * counts = (int *)totalNodes;
+        for (size_t i = 0; i < sizeof(struct nodeNames) / sizeof(int); i++) {
+            hb.currentWork += counts[i];
         }
         hb.monitorCapacity = capacity;
         int res = sendto(sin, &hb, sizeof(struct heartbeat), 0, (struct sockaddr *)&addr, sizeof(addr));
@@ -199,7 +200,7 @@ void * analyseHeartbeats(void * arg) {
     struct heartbeat hb = *args->hb;
     uint32_t myUID = hb.uid;
     struct node ** nodes = args->nodes;
-    int *totalNodes = args->totalNodes;
+    struct nodeNames * totalNodes = args->totalNodes;
     int capacity = args->monitor_capacity;
     if (capacity <= 0) capacity = MONITOR_CAPACITY;
     printf("[analyseHeartbeats] OK %d %d\n", sin, hb.nodeType);
@@ -253,10 +254,10 @@ void * analyseHeartbeats(void * arg) {
             if (strcmp(inet_ntoa(info->ipi_addr), "255.255.255.255") != 0) {
                 printf("[analyseHeartbeats] received heartbeat...\n");
                 int nodePresent = 0;
-                int lastEmptySlot = -1;
                 int tempTotal = 0;
-                for (int i = 0; i < TOTAL_NODES; i++) {
-                    tempTotal += totalNodes[i];
+                int * counts = (int *)totalNodes;
+                for (size_t i = 0; i < sizeof(struct nodeNames) / sizeof(int); i++) {
+                    tempTotal += counts[i];
                 }
                 for (int i = 0; i < MONITOR_CAPACITY; i++) {
                     printf("[analyseHeartbeats] in loop\n");
@@ -265,21 +266,20 @@ void * analyseHeartbeats(void * arg) {
                         nodes[i]->lastUpdated = (tv->tv_sec * 1000000) + tv->tv_usec;
                         printf("[analyseHeartbeats] lastUpdated updated...\n");
                         break;
-                    } else if (tempTotal < capacity && (nodes[i] == NULL || nodes[i]->lastUpdated <= 0) && lastEmptySlot == -1) {
+                    } else if (tempTotal < capacity && (nodes[i] == NULL || nodes[i]->lastUpdated <= 0)) {
                         printf("[analyseHeartbeats] tempTotal: %d, capacity: %d...\n", tempTotal, capacity);
-                        lastEmptySlot = i;
                         struct node * newNode = malloc(sizeof(struct node));
                         newNode->nodeType = hb.nodeType;
                         gettimeofday(tv, NULL);
                         newNode->lastUpdated = (tv->tv_sec * 1000000) + tv->tv_usec;
                         newNode->psiScore = 0;
                         newNode->ip = addr.sin_addr.s_addr;
-                        nodes[lastEmptySlot] = newNode;
-                        totalNodes[hb.nodeType]++;
+                        nodes[i] = newNode;
+                        ((int *)totalNodes)[hb.nodeType] += 1;
                         hb.nodeType = MONITOR_NODE;
                         printf("[analyseHeartbeats] send handshake heartbeat - node: %d, packet: %d, uid: %d, sending to: %s at port: %d \n", hb.nodeType, hb.packetType, hb.uid, inet_ntoa(addr.sin_addr), ntohs(addr.sin_port));
                         sendto(sin, &hb, sizeof(struct heartbeat), 0, (struct sockaddr *)&addr, sizeof(struct sockaddr));
-                        printf("[analyseHeartbeats] new node added %d %d %d %d %d, hb: %d...\n", totalNodes[0], totalNodes[1], totalNodes[2], totalNodes[3], totalNodes[4], hb.nodeType);
+                        printf("[analyseHeartbeats] new node added %d %d %d %d %d, hb: %d...\n", totalNodes->gateways, totalNodes->monitors, totalNodes->assigners, totalNodes->workers, totalNodes->emptyNodes, hb.nodeType);
                         break;
                     }
                 }

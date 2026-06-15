@@ -20,11 +20,10 @@ int main(int argc, char const *argv[])
 
     int yes = 1;
     int level = SOL_SOCKET;
-    int currNodes = 0;
     struct node * nodeDetails[MONITOR_CAPACITY] = {NULL};
-    int totalNodes[TOTAL_NODES] = {0};
-    int systemNodes[TOTAL_NODES] = {0};
-    printf("OK 2 %d %d %d %d %d\n", totalNodes[0], totalNodes[1], totalNodes[2], totalNodes[3], totalNodes[4]);
+    struct nodeNames * totalNodes = malloc(sizeof(struct nodeNames));
+    struct nodeNames * systemNodes = malloc(sizeof(struct nodeNames));
+    printf("OK 2 %d %d %d %d %d\n", totalNodes->gateways, totalNodes->monitors, totalNodes->assigners, totalNodes->workers, totalNodes->emptyNodes);
     struct sock_options * option = malloc(sizeof(struct sock_options));
     printf("OK 3\n");
     struct sock_options * sock_option;
@@ -106,6 +105,8 @@ int main(int argc, char const *argv[])
     mArgs->sin = communication;
     mArgs->uid = uid;
     mArgs->nodes = totalNodes;
+    mArgs->nodeDetails = nodeDetails;
+    mArgs->systemNodes = systemNodes;
     if (pthread_create(&syncThread, NULL, syncMonitors, mArgs) != 0) {
         perror("communication thread");
         free(args1);

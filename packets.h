@@ -8,6 +8,16 @@ struct monitorData {
     int psiScore;
 };
 
+
+struct nodeNames {
+    int gateways;
+    int monitors;
+    int assigners;
+    int workers;
+    int emptyNodes;
+};
+
+
 struct heartbeat {
     int packetType; // 1
     int nodeType;
@@ -46,6 +56,19 @@ struct monitorSync {
     int workers;
     int empty;
     int workerPSI[0];
+};
+
+
+struct monitorConsensusStart {
+    int packetType; // 6
+    int uid;
+    struct nodeNames nodes;
+};
+
+
+struct monitorConsensusVote {
+    int packetType; // 7
+    int votedUID;
 };
 
 

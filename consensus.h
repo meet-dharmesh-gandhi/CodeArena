@@ -11,21 +11,23 @@ struct args {
 };
 
 struct monitorArgs {
-    int *nodes;
+    struct nodeNames * nodes;
+    struct nodeNames * systemNodes;
     int sin;
     int uid;
+    struct node ** nodeDetails;
 };
 
 
 struct maintainTotalArgs {
     int sin;
-    int *nodes;
+    struct nodeNames *nodes;
     int myUID;
 };
 
 struct checkValidNodesArgs {
     struct node ** nodes;
-    int * totalNodes;
+    struct nodeNames * totalNodes;
 };
 
 
