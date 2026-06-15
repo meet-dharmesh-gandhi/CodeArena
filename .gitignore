@@ -4,6 +4,7 @@
 !*/
 
 **ignore**/
+**.ignore**
 *.env
 
 **/.venv/**
