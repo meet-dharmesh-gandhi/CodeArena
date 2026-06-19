@@ -13,4 +13,8 @@ extern int create_thread(
     ...
 );
 
+int wait_for_thread(pthread_t __th, void **__thread_return) {}
+
+int cancel_thread(pthread_t __th) {}
+
 #endif

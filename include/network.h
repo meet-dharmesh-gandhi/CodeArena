@@ -3,7 +3,7 @@
 #include <stdlib.h>
 
 extern void sendFull(int __fd, const void *__buf, size_t __n, int __flags);
-extern void recvFrom(int __fd, const void *__buf, size_t __n, int __flags);
+extern void recvFull(int __fd, const void *__buf, size_t __n, int __flags);
 extern int createSocket(
     const char* port_number,
     int waiting_queue,

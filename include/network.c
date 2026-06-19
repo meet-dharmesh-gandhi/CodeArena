@@ -8,23 +8,40 @@
 #include <sys/types.h>
 #include <stdarg.h>
 
-void sendFull(int __fd, const void *__buf, size_t __n, int __flags) {
+#define MAX_TRIES 3
+
+int sendFull(int __fd, const void *__buf, size_t __n, int __flags) {
     ssize_t sent = 0;
+    int tries = 0;
     while (sent < __n) {
-        ssize_t s = send(__fd, __buf, __n, __flags);
+        if (tries > MAX_TRIES) {
+            return EXIT_FAILURE;
+        }
+        ssize_t s = send(__fd, (uint8_t *)__buf + sent, __n - sent, __flags);
         if (s >= 0) {
             sent += s;
             continue;
         }
-        // TODO Handle this error
+        tries += 1;
     }
+    return EXIT_SUCCESS;
 }
 
-void recvFrom(int __fd, const void *__buf, size_t __n, int __flags) {
+void recvFull(int __fd, void *__buf, size_t __n, int __flags) {
     ssize_t recved = 0;
+    int tries = 0;
     while (recved < __n) {
-        recved += recv(__fd, (uint8_t *)__buf + recved, __n - recved, __flags);
+        if (tries > MAX_TRIES) {
+            return EXIT_FAILURE;
+        }
+        ssize_t r = recv(__fd, (uint8_t *)__buf + recved, __n - recved, __flags);
+        if (r >= 0) {
+            recved += r;
+            continue;
+        }
+        tries += 1;
     }
+    return EXIT_SUCCESS;
 }
 
 int createSocket(const char* port_number, int waiting_queue, int sock_type, const int option_count, ...) {

@@ -3,6 +3,7 @@
 #include "constants.h"
 #include "network.h"
 #include "memory.h"
+#include "threads.h"
 #include <unistd.h>
 #include <stdio.h>
 #include <sys/socket.h>
@@ -23,6 +24,8 @@ struct args {
 	pthread_mutex_t * m;
 	int * wait;
 	pthread_cond_t * cond;
+	pthread_mutex_t * em;
+	int * exit;
 	int nodes;
 	int vote_ID;
 };
@@ -37,8 +40,10 @@ int conduct_voting(int UID, const char* port_number, int vote_ID) {
 	// first create two threads, one proposer and one acceptor
 	pthread_t proposer_th, acceptor_th;
 	pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
+	pthread_mutex_t em = PTHREAD_MUTEX_INITIALIZER;
 	pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
 	int wait = 0;
+	int exit = 0;
 
 	struct args * func_args = xmalloc(sizeof(struct args));
 	func_args->UID = UID;
@@ -46,23 +51,25 @@ int conduct_voting(int UID, const char* port_number, int vote_ID) {
 	func_args->m = &m;
 	func_args->wait = &wait;
 	func_args->cond = &cond;
+	func_args->exit = &exit;
+	func_args->em = &em;
 	func_args->nodes = nodes;
 	func_args->vote_ID = vote_ID;
 
 	void * thread_result;
 
-	pthread_create(&proposer_th, NULL, proposer, (void *)func_args);
-	pthread_create(&acceptor_th, NULL, acceptor, (void *)func_args);
+	create_thread(&proposer_th, NULL, proposer, (void *)func_args, 1, "[conduct_voting] Could not create proposer thread\n");
+	create_thread(&acceptor_th, NULL, acceptor, (void *)func_args, 1, "[conduct_voting] Could not create acceptor thread\n");
 
 	// wait for the acceptor and store the returned value (elected node) in a variable
-	pthread_join(acceptor_th, &thread_result);
-	// once the acceptor gives the result, make the proposer stop too
-	pthread_cancel(proposer_th);
+	wait_for_thread(acceptor_th, &thread_result);
+	// once the acceptor gives the result, wait for the proposer stop
+	wait_for_thread(proposer_th, NULL);
 
 	free(func_args);
 
 	// check if the value returned is actually correct
-	int elected_UID = *(int *)thread_result;
+	int elected_UID = (int)(intptr_t)thread_result;
 	if (elected_UID <= 0) {
 		return -1;
 	}
@@ -127,6 +134,19 @@ void controlExecution(pthread_mutex_t * m, pthread_cond_t * cond, int * wait, in
 	pthread_mutex_unlock(m);
 }
 
+int checkExit(pthread_mutex_t * m, int * exit) {
+	pthread_mutex_lock(m);
+	int r = *exit;
+	pthread_mutex_unlock(m);
+	return r;
+}
+
+void signalExit(pthread_mutex_t * m, int * exit) {
+	pthread_mutex_lock(m);
+	*exit = 1;
+	pthread_mutex_unlock(m);
+}
+
 struct accept_params {
 	int * accepted_N;
 	int * accepted_value;
@@ -139,8 +159,8 @@ struct ack_params {
 
 void * accept_parse(va_list args) {
 	struct accept_params * ap = xmalloc(sizeof(struct accept_params));
-	ap->accepted_N = va_arg(args, int);
-	ap->accepted_value = va_arg(args, int);
+	ap->accepted_N = va_arg(args, int *);
+	ap->accepted_value = va_arg(args, int *);
 	ap->vote_ID = va_arg(args, int);
 	return (void *)ap;
 }
@@ -196,8 +216,8 @@ int recv_majority(
 	int nodes,
 	void * buf,
 	int buf_size,
-	struct sockaddr_in recv_addr,
-	int recv_addr_size,
+	struct sockaddr_in * recv_addr,
+	int * recv_addr_size,
 	void * (*parse)(va_list),
 	int (*eval)(void * buf, void * params),
 	int expected_packet,
@@ -218,7 +238,7 @@ int recv_majority(
 	int packet_ID = 0;
 
 	while (replies < ((nodes / 2) + 1) && fails < SOCKET_TRIALS) {
-		int recved = recvfrom(fd, buf, buf_size, 0, &recv_addr, &recv_addr_size);
+		int recved = recvfrom(fd, buf, buf_size, 0, recv_addr, recv_addr_size);
 		// check if this is a Code Arena Packet
 		if (recved >= sizeof(int)) {
 			memcpy(&packet_ID, buf, sizeof(int));
@@ -256,12 +276,14 @@ void* proposer(void* args) {
 	pthread_mutex_t * m = arg->m;
 	int * wait = arg->wait;
 	pthread_cond_t * cond = arg->cond;
+	pthread_mutex_t * em = arg->em;
+	int * exit = arg->exit;
 	int nodes = arg->nodes;
 	int vote_ID = arg->vote_ID;
 
 	// create request packet
 	struct prepare_packet * pre_p = xmalloc(sizeof(struct prepare_packet));
-	memset(&pre_p, 0, sizeof(struct prepare_packet));
+	memset(pre_p, 0, sizeof(struct prepare_packet));
 	pre_p->packet_ID = PACKET_ID;
 	pre_p->vote_ID = vote_ID;
 	pre_p->UID = UID;
@@ -269,22 +291,22 @@ void* proposer(void* args) {
 
 	// create promise packet
 	struct promise_packet * pro_p = xmalloc(sizeof(struct promise_packet));
-	memset(&pro_p, 0, sizeof(struct promise_packet));
+	memset(pro_p, 0, sizeof(struct promise_packet));
 
 	// create accept packet
 	struct accept_packet * acc_p = xmalloc(sizeof(struct accept_packet));
-	memset(&acc_p, 0, sizeof(struct accept_packet));
+	memset(acc_p, 0, sizeof(struct accept_packet));
 	acc_p->packet_ID = PACKET_ID;
 	acc_p->vote_ID = vote_ID;
 	acc_p->packet_type = ACCEPT_PACKET;
 
 	// struct ack packet
 	struct ack_packet * ack_p = xmalloc(sizeof(struct ack_packet));
-	memset(&ack_p, 0, sizeof(struct ack_packet));
+	memset(ack_p, 0, sizeof(struct ack_packet));
 
 	// struct commit packet
 	struct commit_packet * com_p = xmalloc(sizeof(struct commit_packet));
-	memset(&com_p, 0, sizeof(struct commit_packet));
+	memset(com_p, 0, sizeof(struct commit_packet));
 	com_p->packet_ID = PACKET_ID;
 	com_p->vote_ID = vote_ID;
 	com_p->packet_type = COMMIT_PACKET;
@@ -307,6 +329,9 @@ void* proposer(void* args) {
 	memset(&recv_addr, 0, sizeof(struct sockaddr_in));
 	socklen_t recv_addr_size = sizeof(struct sockaddr_in);
 
+	struct node ** mem_ptrs = get_mem_list(5, pre_p, pro_p, acc_p, ack_p, com_p);
+	pthread_cleanup_push(free_memory, (void *)mem_ptrs);
+
 	#pragma endregion
 
 	#pragma region LOOP
@@ -314,6 +339,10 @@ void* proposer(void* args) {
 	// this thread sends out voting packets
 	int N = 1;
 	while (1) {
+		if (checkExit(em, exit) == 1) {
+			break;
+		}
+
 		pre_p->N = N;
 
 		#pragma region PHASE 1
@@ -331,8 +360,8 @@ void* proposer(void* args) {
 				nodes,
 				(void *)pro_p,
 				sizeof(struct promise_packet),
-				recv_addr,
-				recv_addr_size,
+				&recv_addr,
+				&recv_addr_size,
 				accept_parse,
 				accept_eval,
 				&accepted_N,
@@ -356,7 +385,9 @@ void* proposer(void* args) {
 
 				if (sentAccept < 0) {
 					// some error which should probably not occur since the previous send call was successful
-					// TODO Handle this error
+					// Just continue if this error does occur anyway
+					// The same value will be sent again the next time
+					continue;
 				}
 
 				// now listen for ack packet
@@ -365,8 +396,8 @@ void* proposer(void* args) {
 					nodes,
 					&ack_p,
 					sizeof(struct ack_packet),
-					addr,
-					addr_size,
+					&recv_addr,
+					&recv_addr_size,
 					ack_parse,
 					ack_eval,
 					ACK_PACKET,
@@ -383,16 +414,13 @@ void* proposer(void* args) {
 
 					if (sentCommit < 0) {
 						// some error which should probably not occur since the previous send call was successful
-						// TODO Handle this error
+						// Just continue if this error does occur anyway
+						// Either this node or another node will commit the same value due to the design of paxos
+						continue;
 					}
 
-					free(pre_p);
-					free(pro_p);
-					free(acc_p);
-					free(ack_p);
-					free(com_p);
 					// just exit, the acceptors will know who is the chosen monitor at the end
-					return NULL;
+					break;
 
 					#pragma endregion
 				}
@@ -407,6 +435,8 @@ void* proposer(void* args) {
 		// random backoff
 		usleep(randInt(0, 100000));
 	}
+
+	pthread_cleanup_pop(1);
 
 	#pragma endregion
 }
@@ -427,34 +457,36 @@ void* acceptor(void* args) {
 	pthread_mutex_t * m = arg->m;
 	int * wait = arg->wait;
 	pthread_cond_t * cond = arg->cond;
+	pthread_mutex_t * em = arg->em;
+	int * exit = arg->exit;
 	int nodes = arg->nodes;
 	int vote_ID = arg->vote_ID;
 
 	// create request packet
 	struct prepare_packet * pre_p = xmalloc(sizeof(struct prepare_packet));
-	memset(&pre_p, 0, sizeof(struct prepare_packet));
+	memset(pre_p, 0, sizeof(struct prepare_packet));
 
 	// create promise packet
 	struct promise_packet * pro_p = xmalloc(sizeof(struct promise_packet));
-	memset(&pro_p, 0, sizeof(struct promise_packet));
+	memset(pro_p, 0, sizeof(struct promise_packet));
 	pro_p->packet_ID = PACKET_ID;
 	pro_p->vote_ID = vote_ID;
 	pro_p->packet_type = PROMISE_PACKET;
 
 	// create accept packet
 	struct accept_packet * acc_p = xmalloc(sizeof(struct accept_packet));
-	memset(&acc_p, 0, sizeof(struct accept_packet));
+	memset(acc_p, 0, sizeof(struct accept_packet));
 
 	// struct ack packet
 	struct ack_packet * ack_p = xmalloc(sizeof(struct ack_packet));
-	memset(&ack_p, 0, sizeof(struct ack_packet));
+	memset(ack_p, 0, sizeof(struct ack_packet));
 	ack_p->packet_ID = PACKET_ID;
 	ack_p->vote_ID = vote_ID;
 	ack_p->packet_type = ACK_PACKET;
 
 	// struct commit packet
 	struct commit_packet * com_p = xmalloc(sizeof(struct commit_packet));
-	memset(&com_p, 0, sizeof(struct commit_packet));
+	memset(com_p, 0, sizeof(struct commit_packet));
 
 	// unknown buffer with a size of the largest packet
 	int bufSize = LARGEST_PACKET;
@@ -480,12 +512,15 @@ void* acceptor(void* args) {
 	int accepted_N = 0;
 	int accepted_value = 0;
 	int commited_N = 0;
-	int commited_value = 0;
+	int commited_value = -1;
 
 	int tries = 0;
 
 	int recved_packet_ID = 0;
 	int recved_packet_type = 0;
+
+	struct node ** mem_ptr = get_mem_list(6, pre_p, pro_p, acc_p, ack_p, com_p, buf);
+	pthread_cleanup_push(free_memory, (void *)mem_ptr);
 
 	#pragma endregion
 
@@ -513,7 +548,7 @@ void* acceptor(void* args) {
 				} else {
 					tries = 0;
 					if (recved_packet_type == PREPARE_PACKET && recved == sizeof(struct prepare_packet)) {
-						pre_p = (struct prepare_packet *)buf;
+						memcpy(pre_p, buf, sizeof(struct prepare_packet));
 						// check if the packet is valid and the current N is greater than accepted N and promised N
 						if (pre_p->vote_ID == vote_ID && pre_p->N > accepted_N && pre_p->N > promised_N) {
 							// send the accepted N and value
@@ -529,7 +564,7 @@ void* acceptor(void* args) {
 							controlExecution(m, cond, wait, 1);
 						}
 					} else if (recved_packet_type == ACCEPT_PACKET && recved == sizeof(struct accept_packet)) {
-						acc_p = (struct accept_packet *)pre_p;
+						memcpy(acc_p, buf, sizeof(struct accept_packet));
 						// check if this the N that was promised earlier
 						if (acc_p->vote_ID == vote_ID && acc_p->N == promised_N && promised_N > 0) {
 							// update the accepted value
@@ -537,25 +572,17 @@ void* acceptor(void* args) {
 							accepted_value = acc_p->value;
 							// send the ack packet
 							ack_p->N = accepted_N;
-							if (sendto(fd, ack_p, sizeof(struct ack_packet), 0, &recv_addr, recv_addr_size) < 0) {
-								// promise not sent, handle the error
-								// TODO Handle the error
-							}
+							// if send fails the node will try again to get a majority if it doesn't get majority
+							sendto(fd, ack_p, sizeof(struct ack_packet), 0, &recv_addr, recv_addr_size);
 						}
 					} else if (recved_packet_type == COMMIT_PACKET && recved == sizeof(struct commit_packet)) {
-						com_p = (struct commit_packet *)pre_p;
+						memcpy(com_p, buf, sizeof(struct commit_packet));
 						if (com_p->vote_ID == vote_ID && com_p->N == accepted_N) {
 							// commit the accepted value
 							commited_N = accepted_N;
 							commited_value = accepted_value;
 
-							free(pre_p);
-							free(pro_p);
-							free(acc_p);
-							free(ack_p);
-							free(com_p);
-							free(buf);
-							return (void *)commited_value;
+							break;
 						}
 					}
 				}
@@ -563,13 +590,9 @@ void* acceptor(void* args) {
 		}
 	}
 
-	free(pre_p);
-	free(pro_p);
-	free(acc_p);
-	free(ack_p);
-	free(com_p);
-	free(buf);
-	return -1;
+	signalExit(em, exit);
+	pthread_cleanup_pop(1);
+	return (void *)(intptr_t)commited_value;
 
 	#pragma endregion
 }
