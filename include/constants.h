@@ -11,15 +11,30 @@
 #define WHT "\x1b[37m"
 #define RST "\x1b[0m"
 
-#define PREPARE_PACKET 1
-#define PROMISE_PACKET 2
-#define ACCEPT_PACKET 3
-#define ACK_PACKET 4
-#define COMMIT_PACKET 5
-#define PRESENCE_PACKET 6
+enum Packets {
+    PREPARE_PACKET,
+    PROMISE_PACKET,
+    ACCEPT_PACKET,
+    ACK_PACKET,
+    COMMIT_PACKET,
+    PRESENCE_PACKET,
+    MONITOR_DISCOVERY_PACKET,
+    HEARTBEAT_PACKET
+};
+
+enum NodeTypes {
+    GATEWAY_NODE,
+    MONITOR_NODE,
+    ASSIGNER_NODE,
+    WORKER_NODE,
+    EMPTY_NODE
+};
 
 #define PACKET_ID 0xCAF1 // CAF1 = CAP = Code Arena Project :)
 #define LARGEST_PACKET (sizeof(int) * 5)
+
+#define HEARTBEAT_INTERVAL 10 // in milliseconds
+#define MAX_HEARTBEAT_MISSES 3
 
 #pragma pack(push, 1)
 
@@ -64,6 +79,18 @@ struct commit_packet {
     int packet_type;
     int vote_ID;
     int N;
+};
+
+struct discovery_packet {
+    int packet_ID;
+    int packet_type;
+};
+
+struct heartbeat_packet {
+    int packet_ID;
+    int packet_type;
+    int UID;
+    int node_type;
 };
 
 #pragma pack(pop)
