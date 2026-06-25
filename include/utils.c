@@ -1,6 +1,7 @@
 #include <sys/random.h>
 #include <pthread.h>
 #include <string.h>
+#include <stdint.h>
 
 int randInt(int fallback, int max) {
     unsigned int num;
@@ -94,4 +95,30 @@ void manipulate_value_cond(
     }
 
     pthread_mutex_unlock(m);
+}
+
+int divideCeil(int numerator, int denominator) {
+    int rem = numerator % denominator;
+    return (int)((numerator - rem) / denominator) + limit(rem, 0, 1);
+}
+
+int divideFloor(int numerator, int denominator) {
+    int rem = numerator % denominator;
+    return (int)((numerator - rem) / denominator);
+}
+
+int limit(int num, int lowest, int highest) {
+    return num < lowest ? lowest : num > highest ? highest : num;
+}
+
+int min(int a, int b) {
+    return a < b ? a : b;
+}
+
+int max(int a, int b) {
+    return a > b ? a : b;
+}
+
+int get_index(uint64_t uid, int length) {
+    return (uid * 11400714819323198485llu) % length;
 }

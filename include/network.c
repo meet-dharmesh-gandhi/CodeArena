@@ -27,7 +27,7 @@ int sendFull(int __fd, const void *__buf, size_t __n, int __flags) {
     return EXIT_SUCCESS;
 }
 
-void recvFull(int __fd, void *__buf, size_t __n, int __flags) {
+int recvFull(int __fd, void *__buf, size_t __n, int __flags) {
     ssize_t recved = 0;
     int tries = 0;
     while (recved < __n) {
@@ -81,7 +81,7 @@ int createSocket(const char* port_number, int waiting_queue, int sock_type, cons
         va_list args;
         va_start(args, option_count);
 
-        for (int i = 0; i < option_count; i += 4) {
+        for (int i = 0; i < option_count; i++) {
             int level = va_arg(args, int);
             int optname = va_arg(args, int);
             void* optval = va_arg(args, void*);
@@ -121,7 +121,7 @@ int createSocket(const char* port_number, int waiting_queue, int sock_type, cons
     return sin;
 }
 
-void * set_broadcast_addr(const char* port_number, struct sockaddr_in * addr) {
+void set_broadcast_addr(const char* port_number, struct sockaddr_in * addr) {
 	memset(addr, 0, sizeof(struct sockaddr_in));
 	addr->sin_addr.s_addr = inet_addr("255.255.255.255");
 	addr->sin_port = htons(atoi(port_number));
