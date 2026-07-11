@@ -26,8 +26,12 @@ struct sockaddr_in *broadcastAddr;
 const int addrLen = sizeof(struct sockaddr_in);
 
 uint8_t *inputBuffer;
-const int inputBufferSize = sizeof(uint8_t) * BUFFER_SIZE;
+const int inputBufferSize = sizeof(uint8_t) * sizeof(struct io_packet);
 int *inputBufferPtr;
+uint8_t *buddyBuffer;
+const int buddyBufferSize =
+	sizeof(uint8_t) * sizeof(struct buddy_heartbeat_packet);
+int *buddyBufferPtr;
 
 int task_fd, find_fd, hb_fd, role_fd, discover_fd, gateway_fd, buddy_fd,
 	timer_fd, accept_buddy_fd, accept_worker_fd;
@@ -63,6 +67,8 @@ struct heartbeat_packet *hb;
 const int hb_size = sizeof(struct heartbeat_packet);
 struct find_monitor_packet *fmp;
 const int fmp_size = sizeof(struct find_monitor_packet);
+struct buddy_heartbeat_packet *bhp;
+const int bhp_size = sizeof(struct buddy_heartbeat_packet);
 
 struct tcp_session {
 	int worker_fd;
@@ -97,7 +103,11 @@ int main(int argc, char const *argv[]) {
 	set_broadcast_addr(DISCOVER_PORT, broadcastAddr);
 
 	inputBuffer = amalloc(&arena, inputBufferSize);
+	inputBufferPtr = amalloc(&arena, sizeof(int));
 	*inputBufferPtr = 0;
+	buddyBuffer = amalloc(&arena, buddyBufferSize);
+	buddyBufferPtr = amalloc(&arena, sizeof(int));
+	*buddyBufferPtr = 0;
 
 	task_fd = getNewSocket(TASK_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
 	find_fd = getNewSocket(FIND_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
@@ -128,6 +138,7 @@ int main(int argc, char const *argv[]) {
 	rtgp = amalloc(&arena, rtgp_size);
 	hb = amalloc(&arena, hb_size);
 	fmp = amalloc(&arena, fmp_size);
+	bhp = amalloc(&arena, bhp_size);
 
 	gateway_sd = amalloc(&arena, sizeof(struct socketDetails));
 	gateway_sd->fd = gateway_fd;
@@ -166,8 +177,11 @@ void handle_timer_fd(struct socketDetails *sd) {
 	// then send heartbeat
 	sendHeartbeat();
 
-	// finally retry all packets in the retry list
+	// then retry all packets in the retry list
 	retryPackets();
+
+	// finally send heartbeat to the buddy
+	sendBuddyHeartbeat();
 }
 
 void handle_accept_buddy_fd(struct socketDetails *sd) {
@@ -182,7 +196,6 @@ void handle_accept_buddy_fd(struct socketDetails *sd) {
 					// no more connections
 					break;
 				} else {
-					// TODO log this error
 					continue;
 				}
 			} else {
@@ -219,7 +232,6 @@ void handle_accept_worker_fd(struct socketDetails *sd) {
 					// no more connections
 					break;
 				} else {
-					// TODO log this error
 					continue;
 				}
 			} else {
@@ -292,8 +304,24 @@ void handle_buddy_fd(struct socketDetails *sd) {
 		}
 	} else if (events & EPOLLIN) {
 		// message from buddy
-		// TODO connect to the gateway if not already
-		// on each heartbeat from the buddy
+		// copy to
+		while (1) {
+			int packet_type =
+				getPacketType(sd->fd, buddyBuffer, buddyBufferPtr);
+
+			if (packet_type == BUDDY_HEARTBEAT_PACKET) {
+				// copy to bhp
+				int done = getPacketData(sd->fd, buddyBuffer, &buddyBufferPtr,
+										 bhp, bhp_size);
+
+				if (done == YES) {
+					memcpy(buddyTaskList, bhp->taskDetails,
+						   buddyTaskListLength);
+
+					memcpy(gatewayAddr, &bhp->gatewayAddr, addrLen);
+				}
+			}
+		}
 	}
 }
 
@@ -726,6 +754,24 @@ void handle_task_fd(struct socketDetails *sd) {
 }
 
 // -------------------- UTILS --------------------
+
+/**
+ * Sends heartbeat to the buddy if the buddy exists
+ */
+void sendBuddyHeartbeat() {
+	if (buddyAddr == NULL) {
+		return;
+	}
+
+	bhp->packet_ID = PACKET_ID;
+	bhp->packet_type = BUDDY_HEARTBEAT_PACKET;
+	bhp->node_type = ASSIGNER_NODE;
+	bhp->UID = UID;
+	memcpy(&bhp->gatewayAddr, gatewayAddr, addrLen);
+	memcpy(&bhp->taskDetails, taskList, taskListLength);
+
+	send(buddy_fd, bhp, bhp_size, 0);
+}
 
 /**
  * Finds the task with the given task ID
