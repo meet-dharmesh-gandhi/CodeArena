@@ -134,3 +134,54 @@ void readTimerFD(int timerfd) {
 		}
 	}
 }
+
+/**
+ * Gets the packet type of the current packet in the tcp buffer
+ * If the buffer has enough type bytes, returns the packet_type
+ * If the buffer lacks some type bytes, returns NO
+ * If `fd_buf` already contains type bytes, returns UNKNOWN
+ */
+int getPacketType(int fd, uint8_t *fd_buf, int fd_buf_ptr) {
+	if (fd_buf_ptr < (sizeof(int) * 2)) {
+		int required = (sizeof(int) * 2) - fd_buf_ptr;
+		int recved = recv(fd, fd_buf, required, 0);
+
+		if (recved == required) {
+			// great, type received
+			int packet_type;
+			memcpy(&packet_type, fd_buf[sizeof(int)], sizeof(int));
+			return packet_type;
+		}
+
+		return NO;
+	}
+
+	return UNKNOWN;
+}
+
+/**
+ * Gets packet data
+ * Returns YES if packet is fully formed
+ * Returns NO if the packet is not formed
+ * Returns UNKNOWN if the type bytes are not formed
+ */
+int getPacketData(int fd, uint8_t *fd_buf, int fd_buf_ptr, uint8_t *packet,
+				  int packet_len) {
+	if (fd_buf_ptr < 8) {
+		return UNKNOWN;
+	}
+
+	if (fd_buf_ptr < packet_len) {
+		int recved = recv(fd, fd_buf[fd_buf_ptr], packet_len - fd_buf_ptr, 0);
+		fd_buf_ptr += recved;
+	}
+
+	if (fd_buf_ptr >= packet_len) {
+		memcpy(packet, fd_buf, packet_len);
+		memmove(fd_buf, fd_buf[packet_len], fd_buf_ptr - packet_len);
+		fd_buf_ptr = fd_buf_ptr - packet_len;
+		return YES;
+	}
+
+	return NO;
+}
