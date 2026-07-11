@@ -14,6 +14,9 @@ uint8_t *fd_buf;
 const int fdBuf_size = sizeof(uint8_t) * LARGEST_PACKET;
 uint8_t *buf;
 const int buf_size = sizeof(uint8_t) * BUFFER_SIZE * WORKER_CAPACITY;
+uint8_t *assignerBuf;
+const int assignerBufSize = sizeof(uint8_t) * sizeof(struct io_packet);
+int *assignerBufPtr;
 
 int task_fd, discover_fd, hb_fd, assigner_fd, role_fd, timer_fd;
 
@@ -40,6 +43,8 @@ struct find_monitor_packet *fmp;
 const int fmp_size = sizeof(struct find_monitor_packet);
 struct heartbeat_packet *hb;
 const int hb_size = sizeof(struct heartbeat_packet);
+struct io_packet *iop;
+const int iop_size = sizeof(struct io_packet);
 
 int main(int argc, char const *argv[]) {
 	UID = randInt(-1, MAX_UID);
@@ -73,6 +78,10 @@ int main(int argc, char const *argv[]) {
 
 	timer_fd =
 		getNewTimerFD(CLOCK_MONOTONIC, HEARTBEAT_INTERVAL, HEARTBEAT_INTERVAL);
+
+	assignerBuf = amalloc(&arena, assignerBufSize);
+	assignerBufPtr = amalloc(&arena, sizeof(int));
+	*assignerBufPtr = 0;
 
 	gp = amalloc(&arena, gp_size);
 	tp = amalloc(&arena, tp_size);
@@ -126,23 +135,23 @@ void handle_assigner_fd(struct socketDetails *sd) {
 		markTasks(sd->fd);
 	} else if (sd->events & EPOLLIN) {
 		while (1) {
-			// since tcp is connection oriented, message boundaries are
-			// invisible hence check for io packets only if the packet coming in
-			// is over_packet then there is a guarantee that no other other
-			// packet is behind it
-			int res = getNextSTREAMPacket(sd->fd, fd_buf, fdBuf_size, 0);
-			// TODO create a data parser to parse packet boundaries
-			// TODO put all these incoming packets into a buffer and
-			// when hitting EAGAIN, only then parse
-			int packet_type = 0;
-			// ASSUMPTION: packet type is returned
-			// and the packet data is set by the
-			// parser function
+			int packet_type =
+				getPacketType(sd->fd, assignerBuf, assignerBufPtr);
 
-			if (res == EXIT_SUCCESS) {
-				if (packet_type == IO_PACKET) {
-					// packet - iop
-				} else if (packet_type == RESUME_TASK_PACKET) {
+			if (packet_type == IO_PACKET) {
+				// copy to iop
+				int done = getPacketData(sd->fd, assignerBuf, assignerBufPtr,
+										 iop, iop_size);
+
+				if (done == YES) {
+					// TODO process the packet
+				}
+			} else if (packet_type == RESUME_TASK_PACKET) {
+				// copy to rtwp
+				int done = getPacketData(sd->fd, assignerBuf, assignerBufPtr,
+										 rtwp, rtwp_size);
+
+				if (done == YES) {
 					// add this task to the task list
 					if (addToTaskList(rtwp->taskID, sd->fd, addr) == NO) {
 						// task list full
@@ -150,7 +159,13 @@ void handle_assigner_fd(struct socketDetails *sd) {
 					}
 
 					unmarkTask(rtwp->taskID);
-				} else if (packet_type == CANCEL_TASK_PACKET) {
+				}
+			} else if (packet_type == CANCEL_TASK_PACKET) {
+				// copy to ctp
+				int done = getPacketData(sd->fd, assignerBuf, assignerBufPtr,
+										 ctp, ctp_size);
+
+				if (done == YES) {
 					shutdown(sd->fd, SHUT_RDWR);
 					removeFromTaskList(ctp->taskID);
 				}
