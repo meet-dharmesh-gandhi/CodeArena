@@ -2,14 +2,7 @@
 #define ASYNC_H
 #include "constants.h"
 
-struct socketDetails {
-	int fd;
-	uint32_t events;
-	void *data;
-	void *(*handler)(struct socketDetails *sd);
-};
-
-void startLoop(int epollfd, int max_events, int nfds, ...);
+void startLoop(int max_events, int nfds, ...);
 
 int getNextDGRAMPacket(int __fd, void *__restrict__ __buf, size_t __n,
 					   int __flags, struct sockaddr *__restrict__ __addr,
@@ -19,5 +12,11 @@ int getNextSTREAMPacket(int __fd, void *__restrict__ __buf, size_t __n,
 						int __flags);
 
 void readTimerFD(int timerfd);
+
+int addFDToEpoll(int fd, int events, void *data);
+
+int modifyFDInEpoll(int fd, int events, void *data);
+
+int deleteFDInEpoll(int fd);
 
 #endif

@@ -9,13 +9,22 @@
 #include <netdb.h>
 #include <signal.h>
 #include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/timerfd.h>
 #include <unistd.h>
 
-void startLoop(int epollfd, int max_events, int nfds, ...) {
+int epollfd = -1;
+
+void startLoop(int max_events, int nfds, ...) {
+	epollfd = epoll_create1(0);
+
+	if (epollfd < 0) {
+		return;
+	}
+
 	struct epoll_event ev, events[max_events];
 
 	ev.events = EPOLLIN | EPOLLRDHUP | EPOLLET;
@@ -54,13 +63,39 @@ void startLoop(int epollfd, int max_events, int nfds, ...) {
 	}
 }
 
+int addFDToEpoll(int fd, int events, void *data) {
+	struct epoll_event ev;
+	ev.events = events;
+	ev.data.ptr = data;
+
+	return epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &ev);
+}
+
+int modifyFDInEpoll(int fd, int events, void *data) {
+	struct epoll_event ev;
+	ev.events = events;
+	ev.data.ptr = data;
+
+	return epoll_ctl(epollfd, EPOLL_CTL_MOD, fd, &ev);
+}
+
+int deleteFDInEpoll(int fd) {
+	return epoll_ctl(epollfd, EPOLL_CTL_DEL, fd, NULL);
+}
+
+/**
+ * Stores the next packet in the kernel queue to the __buf pointer
+ * Returns EXIT_SUCCESS (0) on successful packet extraction
+ * Returns EXIT_FAILTURE (1) when queue empty (hits EAGAIN or EWOULDBLOCK)
+ * Returns 2 for other errors
+ */
 int getNextDGRAMPacket(int __fd, void *__restrict__ __buf, size_t __n,
 					   int __flags, struct sockaddr *__restrict__ __addr,
 					   socklen_t *__restrict__ __addr_len) {
 	*__addr_len = sizeof(struct sockaddr_in);
 	int recved = recvfrom(__fd, __buf, __n, __flags, __addr, __addr_len);
 	if (recved == -1) {
-		if ((errno == EAGAIN || errno == EWOULDBLOCK)) {
+		if (errno == EAGAIN || errno == EWOULDBLOCK) {
 			return EXIT_FAILURE;
 		}
 		return 2;
@@ -68,6 +103,12 @@ int getNextDGRAMPacket(int __fd, void *__restrict__ __buf, size_t __n,
 	return EXIT_SUCCESS;
 }
 
+/**
+ * Stores the next packet in the kernel queue to the __buf pointer
+ * Returns EXIT_SUCCESS (0) on successful packet extraction
+ * Returns EXIT_FAILTURE (1) when queue empty (hits EAGAIN or EWOULDBLOCK)
+ * Returns 2 for other errors
+ */
 int getNextSTREAMPacket(int __fd, void *__restrict__ __buf, size_t __n,
 						int __flags) {
 	int recved = recvFull(__fd, __buf, __n, __flags);
@@ -82,5 +123,14 @@ int getNextSTREAMPacket(int __fd, void *__restrict__ __buf, size_t __n,
 
 void readTimerFD(int timerfd) {
 	uint64_t res;
-	read(timerfd, &res, sizeof(uint64_t));
+	while (1) {
+		if (read(timerfd, &res, sizeof(uint64_t)) == -1) {
+			if (errno == EAGAIN) {
+				break;
+			} else {
+				printc(RED, "readTimerFD", "read returned an error:");
+				perror("readTimerFD");
+			}
+		}
+	}
 }
