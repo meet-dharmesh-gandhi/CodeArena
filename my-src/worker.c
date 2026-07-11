@@ -105,9 +105,9 @@ void handle_role_fd(struct socketDetails *sd) {
 
 			if (packet_type == PROMOTE_PACKET &&
 				pp->target_node_type == ASSIGNER_NODE) {
-				// TODO get promoted to an assigner node
+				morph(ASSIGNER_NODE);
 			} else if (packet_type == DEMOTE_PACKET) {
-				// TODO demote to empty node
+				morph(EMPTY_NODE);
 			}
 		} else if (res != 2) {
 			break;

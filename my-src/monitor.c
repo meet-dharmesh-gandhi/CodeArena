@@ -91,7 +91,7 @@ void handle_role_fd(struct socketDetails *sd) {
 			if (packet_type == PROMOTE_PACKET) {
 				// should not happen
 			} else if (packet_type == DEMOTE_PACKET) {
-				// TODO demote to an empty node
+				morph(EMPTY_NODE);
 			}
 		} else if (res != 2) {
 			break;

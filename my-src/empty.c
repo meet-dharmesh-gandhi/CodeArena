@@ -107,9 +107,9 @@ void handle_role_fd(struct socketDetails *sd) {
 				memcpy(pp, fd_buf, pp_size);
 
 				if (pp->target_node_type == ASSIGNER_NODE) {
-					// TODO promote to assigner
+					morph(ASSIGNER_NODE);
 				} else if (pp->target_node_type == WORKER_NODE) {
-					// TODO promote to worker
+					morph(WORKER_NODE);
 				}
 			} else if (packet_type == DEMOTE_PACKET) {
 				// currently impossible to happen
@@ -128,7 +128,8 @@ void sendHeartbeat() {
 	}
 
 	if (memcmp(monitorAddr, emptyAddr, addrLen) == 0) {
-		// TODO promote to monitor
+		// TODO add a small jitter before doing this
+		morph(MONITOR_NODE);
 		return;
 	}
 
