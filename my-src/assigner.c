@@ -25,13 +25,14 @@ struct sockaddr_in *emptyAddr;
 struct sockaddr_in *broadcastAddr;
 const int addrLen = sizeof(struct sockaddr_in);
 
-char *inputBuffer;
-const int inputBufferSize = sizeof(char) * BUFFER_SIZE;
-char *outputBuffer;
-const int outputBufferSize = sizeof(char) * BUFFER_SIZE;
+uint8_t *inputBuffer;
+const int inputBufferSize = sizeof(uint8_t) * BUFFER_SIZE;
+int *inputBufferPtr;
 
 int task_fd, find_fd, hb_fd, role_fd, discover_fd, gateway_fd, buddy_fd,
 	timer_fd, accept_buddy_fd, accept_worker_fd;
+
+struct socketDetails *gateway_sd;
 
 uint8_t *fd_buf;
 const int fdBufSize = sizeof(uint8_t) * LARGEST_PACKET;
@@ -63,6 +64,14 @@ const int hb_size = sizeof(struct heartbeat_packet);
 struct find_monitor_packet *fmp;
 const int fmp_size = sizeof(struct find_monitor_packet);
 
+struct tcp_session {
+	int worker_fd;
+	uint8_t *buf;
+	int buf_ptr;
+	uint8_t *g_buf;
+	int g_buf_ptr;
+};
+
 int main(int argc, char const *argv[]) {
 	UID = randInt(-1, MAX_UID);
 
@@ -88,7 +97,7 @@ int main(int argc, char const *argv[]) {
 	set_broadcast_addr(DISCOVER_PORT, broadcastAddr);
 
 	inputBuffer = amalloc(&arena, inputBufferSize);
-	outputBuffer = amalloc(&arena, outputBufferSize);
+	*inputBufferPtr = 0;
 
 	task_fd = getNewSocket(TASK_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
 	find_fd = getNewSocket(FIND_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
@@ -119,6 +128,12 @@ int main(int argc, char const *argv[]) {
 	rtgp = amalloc(&arena, rtgp_size);
 	hb = amalloc(&arena, hb_size);
 	fmp = amalloc(&arena, fmp_size);
+
+	gateway_sd = amalloc(&arena, sizeof(struct socketDetails));
+	gateway_sd->fd = gateway_fd;
+	gateway_sd->handler = handle_gateway_fd;
+	gateway_sd->data = NULL;
+	gateway_sd->events = 0;
 
 	return 0;
 }
@@ -180,14 +195,9 @@ void handle_accept_buddy_fd(struct socketDetails *sd) {
 						struct socketDetails *newSd =
 							amalloc(&arena, sizeof(struct socketDetails));
 						newSd->fd = res;
-						newSd->events = EPOLLIN | EPOLLERR | EPOLLRDHUP |
-										EPOLLHUP | EPOLLET;
 						newSd->data = NULL;
 						newSd->handler = expectedConnectionsList[i].handler;
-						addFDToEpoll(res,
-									 EPOLLIN | EPOLLERR | EPOLLRDHUP |
-										 EPOLLHUP | EPOLLET,
-									 sd);
+						addFDToEpoll(res, EPOLL_IN | EPOLL_DESTROY, sd);
 						expectedConnectionsList[i].filled = 0;
 						break;
 					}
@@ -219,15 +229,20 @@ void handle_accept_worker_fd(struct socketDetails *sd) {
 						memcmp(&expectedConnectionsList[i].addr, addr,
 							   addrLen) == 0) {
 						// connection was expected, add to epoll
-						sd->fd = res;
-						sd->events = EPOLLIN | EPOLLERR | EPOLLRDHUP |
-									 EPOLLHUP | EPOLLET;
-						sd->data = NULL;
-						sd->handler = expectedConnectionsList[i].handler;
-						addFDToEpoll(res,
-									 EPOLLIN | EPOLLERR | EPOLLRDHUP |
-										 EPOLLHUP | EPOLLET,
-									 sd);
+						struct socketDetails *newSd =
+							amalloc(&arena, sizeof(struct socketDetails));
+						newSd->fd = res;
+						struct tcp_session *ts =
+							amalloc(&arena, sizeof(struct tcp_session));
+						ts->buf = amalloc(&arena, iop_size);
+						ts->buf_ptr = -1;
+						ts->g_buf = amalloc(&arena, iop_size);
+						ts->g_buf_ptr = -1;
+						ts->worker_fd = res;
+						newSd->data = ts;
+						newSd->handler = expectedConnectionsList[i].handler;
+						addFDToEpoll(res, EPOLL_IN | EPOLL_DESTROY, newSd);
+						modifyTaskSd(newSd, addr);
 						expectedConnectionsList[i].filled = 0;
 						break;
 					}
@@ -337,44 +352,159 @@ void handle_gateway_fd(struct socketDetails *sd) {
 	int events = sd->events;
 
 	if (events & EPOLLOUT) {
-		// connection established
-		modifyFDInEpoll(
-			sd->fd, EPOLLET | EPOLLERR | EPOLLHUP | EPOLLRDHUP | EPOLLIN, sd);
+		for (int i = 0; i < taskListLength; i++) {
+			if (taskList[i].filled == 1) {
+				struct tcp_session *ts =
+					(struct tcp_session *)taskList[i].sd->data;
+				if (ts->buf_ptr != -1) {
+					int required = iop_size - ts->buf_ptr;
+					int sent = send(sd->fd, ts->buf + ts->buf_ptr, required, 0);
+
+					if (sent < required) {
+						ts->buf_ptr += max(sent, 0);
+						return;
+					}
+
+					ts->buf_ptr = 0;
+
+					// perform the tasks a worker would perform
+					while (1) {
+						int packet_type =
+							getPacketType(ts->worker_fd, ts->buf, &ts->buf_ptr);
+
+						if (packet_type == IO_PACKET) {
+							// copy to iop
+							int done =
+								getPacketData(ts->worker_fd, ts->buf,
+											  &ts->buf_ptr, iop, iop_size);
+
+							if (done == YES) {
+								// now forward this data to the gateway
+								int sent = send(gateway_fd, iop, iop_size, 0);
+
+								if (sent < iop_size) {
+									ts->buf_ptr = max(sent, 0);
+									break;
+								}
+							}
+						} else if (packet_type == TASK_OVER_PACKET) {
+							// copy to top
+							int done =
+								getPacketData(ts->worker_fd, ts->buf,
+											  &ts->buf_ptr, top, top_size);
+
+							if (done == YES) {
+								close(ts->worker_fd);
+								deleteFDInEpoll(ts->worker_fd);
+								removeTask(top->taskID);
+								sendTaskOverPacket(gateway_fd, top->taskID);
+							}
+						} else if (packet_type == CANCEL_TASK_PACKET) {
+							// copy to ctp
+							int done =
+								getPacketData(ts->worker_fd, ts->buf,
+											  &ts->buf_ptr, ctp, ctp_size);
+
+							if (done == YES) {
+								sendCancelTaskPacket(gateway_fd, ctp->taskID);
+							}
+						} else if (packet_type == ERROR ||
+								   packet_type == UNKNOWN) {
+							// add EPOLLIN to both sockets
+							modifyFDInEpoll(sd->fd, EPOLL_IN | EPOLL_DESTROY,
+											sd);
+							modifyFDInEpoll(ts->worker_fd,
+											EPOLL_IN | EPOLL_DESTROY,
+											taskList[i].sd);
+
+							// also set buf_ptr to -1
+							ts->buf_ptr = -1;
+							break;
+						}
+					}
+				} else {
+					// this should not happen generally, but in case there are
+					// bugs :(
+					// add EPOLLIN to both sockets
+					modifyFDInEpoll(sd->fd, EPOLL_IN | EPOLL_DESTROY, sd);
+					modifyFDInEpoll(ts->worker_fd, EPOLL_IN | EPOLL_DESTROY,
+									taskList[i].sd);
+				}
+			}
+		}
 	} else if (events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
 		// connection dropped
-		// TODO handle this connection drop
+		// remove all tasks
+		for (int i = 0; i < taskListLength; i++) {
+			taskList[i].filled = 0;
+		}
 	} else if (events & EPOLLIN) {
 		// some input from the gateway, pass it to the worker
 		while (1) {
-			// since tcp is connection oriented, message boundaries are
-			// invisible hence check for io packets only if the packet coming in
-			// is over_packet then there is a guarantee that no other other
-			// packet is behind it
-			int res = getNextSTREAMPacket(sd->fd, iop, iop_size, 0);
-			// TODO create a data parser to parse packet boundaries
-			// TODO put all these incoming packets into a buffer and
-			// when hitting EAGAIN, only then parse
-			int packet_type = 0;
-			// ASSUMPTION: packet type is returned
-			// and the packet data is set by the
-			// parser function
+			int packet_type =
+				getPacketType(sd->fd, inputBuffer, inputBufferPtr);
 
-			if (res == EXIT_SUCCESS) {
-				if (packet_type == IO_PACKET) {
-					// packet - iop
-					// forward this packet to the worker
-				} else if (packet_type == TASK_OVER_PACKET) {
-					// packet - top
+			if (packet_type == IO_PACKET) {
+				// packet - iop
+				int done = getPacketData(sd->fd, inputBuffer, inputBufferPtr,
+										 iop, addrLen);
+
+				if (done == YES) {
+					// packet is formed
+					// find the task
+					int ind = findTask(iop->task_ID);
+
+					if (ind != NO) {
+						// found the task
+						int sent = send(taskList[ind].fd, iop, iop_size, 0);
+
+						if (sent < iop_size) {
+							struct tcp_session *ts = taskList[ind].sd->data;
+
+							// copy iop into g_buf
+							memcpy(ts->g_buf, iop, iop_size);
+							ts->g_buf_ptr = max(sent, 0);
+
+							// remove EPOLLIN from this socket
+							modifyFDInEpoll(sd->fd, EPOLLET | EPOLL_DESTROY,
+											sd);
+
+							// add EPOLLOUT to worker socket
+							modifyFDInEpoll(taskList[ind].fd,
+											EPOLL_OUT | EPOLL_DESTROY,
+											taskList[ind].sd);
+
+							break;
+						}
+					}
+				}
+			} else if (packet_type == TASK_OVER_PACKET) {
+				// copy to top
+				int done = getPacketData(sd->fd, inputBuffer, inputBufferPtr,
+										 top, top_size);
+
+				if (done == YES) {
 					close(sd->fd);
 					deleteFDInEpoll(sd->fd);
 					removeTask(top->taskID);
-				} else if (packet_type == CANCEL_TASK_PACKET) {
-					// packet - ctp
-					sendCancelTaskPackets();
-				} else if (packet_type == TASK_PACKET) {
-					processTaskPacket(sd);
 				}
-			} else if (res != 2) {
+			} else if (packet_type == CANCEL_TASK_PACKET) {
+				// copy to ctp
+				int done = getPacketData(sd->fd, inputBuffer, inputBufferPtr,
+										 ctp, ctp_size);
+
+				if (done == YES) {
+					sendCancelTaskPackets();
+				}
+			} else if (packet_type == TASK_PACKET) {
+				// copy to tp
+				int done = getPacketData(sd->fd, inputBuffer, &inputBufferPtr,
+										 tp, tp_size);
+
+				if (done == YES) {
+					processTaskPacket();
+				}
+			} else if (packet_type == ERROR || packet_type == UNKNOWN) {
 				break;
 			}
 		}
@@ -385,9 +515,84 @@ void handle_worker_fd(struct socketDetails *sd) {
 	int events = sd->events;
 
 	if (events & EPOLLOUT) {
-		// connection established
-		modifyFDInEpoll(
-			sd->fd, EPOLLET | EPOLLERR | EPOLLHUP | EPOLLRDHUP | EPOLLIN, sd);
+		struct tcp_session *ts = (struct tcp_session *)sd->data;
+
+		if (ts->g_buf_ptr != -1) {
+			int required = ts->g_buf_ptr + iop_size;
+			int sent = send(gateway_fd, ts->g_buf + ts->g_buf_ptr, required, 0);
+
+			if (send < required) {
+				ts->g_buf_ptr += max(sent, 0);
+				return;
+			}
+
+			ts->g_buf_ptr = 0;
+
+			// some input from the gateway, pass it to the worker
+			while (1) {
+				int packet_type =
+					getPacketType(sd->fd, inputBuffer, inputBufferPtr);
+
+				if (packet_type == IO_PACKET) {
+					// packet - iop
+					int done = getPacketData(sd->fd, inputBuffer,
+											 inputBufferPtr, iop, addrLen);
+
+					if (done == YES) {
+						// packet is formed
+						int sent = send(sd->fd, iop, iop_size, 0);
+
+						if (sent < iop_size) {
+							// copy iop into g_buf
+							memcpy(ts->g_buf, iop, iop_size);
+							ts->g_buf_ptr = max(sent, 0);
+							break;
+						}
+					}
+				} else if (packet_type == TASK_OVER_PACKET) {
+					// copy to top
+					int done = getPacketData(gateway_fd, inputBuffer,
+											 inputBufferPtr, top, top_size);
+
+					if (done == YES) {
+						close(sd->fd);
+						deleteFDInEpoll(sd->fd);
+						removeTask(top->taskID);
+					}
+				} else if (packet_type == CANCEL_TASK_PACKET) {
+					// copy to ctp
+					int done = getPacketData(gateway_fd, inputBuffer,
+											 inputBufferPtr, ctp, ctp_size);
+
+					if (done == YES) {
+						sendCancelTaskPackets();
+					}
+				} else if (packet_type == TASK_PACKET) {
+					// copy to tp
+					int done = getPacketData(gateway_fd, inputBuffer,
+											 inputBufferPtr, tp, tp_size);
+
+					if (done == YES) {
+						processTaskPacket();
+					}
+				} else if (packet_type == ERROR || packet_type == UNKNOWN) {
+					// add EPOLLIN to both sockets
+					modifyFDInEpoll(sd->fd, EPOLL_IN | EPOLL_DESTROY, sd);
+					modifyFDInEpoll(gateway_fd, EPOLL_IN | EPOLL_DESTROY,
+									gateway_sd);
+
+					// set g_buf_ptr to -1
+					ts->g_buf_ptr = -1;
+					break;
+				}
+			}
+		} else {
+			// this should not happen generally, but in case there are
+			// bugs :(
+			// add EPOLLIN to both sockets
+			modifyFDInEpoll(sd->fd, EPOLL_IN | EPOLL_DESTROY, sd);
+			modifyFDInEpoll(gateway_fd, EPOLL_IN | EPOLL_DESTROY, gateway_sd);
+		}
 	} else if (events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
 		// connection dropped
 		// TODO handle this connection drop
@@ -395,34 +600,55 @@ void handle_worker_fd(struct socketDetails *sd) {
 		// listen for incoming connections
 		// some output from the worker, pass it to the gateway
 		while (1) {
-			// since tcp is connection oriented, message boundaries are
-			// invisible hence check for io packets only if the packet coming in
-			// is over_packet then there is a guarantee that no other other
-			// packet is behind it
-			int res = getNextSTREAMPacket(sd->fd, iop, iop_size, 0);
-			// TODO create a data parser to parse packet boundaries
-			// TODO put all these incoming packets into a buffer and
-			// when hitting EAGAIN, only then parse
-			int packet_type = 0;
-			// ASSUMPTION: packet type is returned
-			// and the packet data is set by the
-			// parser function
+			if (sd->data == NULL) {
+				return;
+			}
 
-			if (res == EXIT_SUCCESS) {
-				if (packet_type == IO_PACKET) {
-					// packet - iop
-					// forward this packet to the gateway
-				} else if (packet_type == TASK_OVER_PACKET) {
-					// packet - top
+			struct tcp_session *ts = (struct tcp_session *)sd->data;
+			int packet_type = getPacketType(sd->fd, ts->buf, &ts->buf_ptr);
+
+			if (packet_type == IO_PACKET) {
+				// copy to iop
+				int done =
+					getPacketData(sd->fd, ts->buf, &ts->buf_ptr, iop, iop_size);
+
+				if (done == YES) {
+					// now forward this data to the gateway
+					int sent = send(gateway_fd, iop, iop_size, 0);
+
+					if (sent < iop_size) {
+						ts->buf_ptr = max(sent, 0);
+
+						// remove EPOLLIN from this socket
+						modifyFDInEpoll(sd->fd, EPOLLET | EPOLL_DESTROY, sd);
+
+						// add EPOLLOUT to gateway socket
+						modifyFDInEpoll(gateway_fd, EPOLL_OUT | EPOLL_DESTROY,
+										gateway_sd);
+
+						break;
+					}
+				}
+			} else if (packet_type == TASK_OVER_PACKET) {
+				// copy to top
+				int done =
+					getPacketData(sd->fd, ts->buf, &ts->buf_ptr, top, top_size);
+
+				if (done == YES) {
 					close(sd->fd);
 					deleteFDInEpoll(sd->fd);
 					removeTask(top->taskID);
 					sendTaskOverPacket(gateway_fd, top->taskID);
-				} else if (packet_type == CANCEL_TASK_PACKET) {
-					// packet - ctp
+				}
+			} else if (packet_type == CANCEL_TASK_PACKET) {
+				// copy to ctp
+				int done =
+					getPacketData(sd->fd, ts->buf, &ts->buf_ptr, ctp, ctp_size);
+
+				if (done == YES) {
 					sendCancelTaskPacket(gateway_fd, ctp->taskID);
 				}
-			} else if (res != 2) {
+			} else if (packet_type == ERROR || packet_type == UNKNOWN) {
 				break;
 			}
 		}
@@ -500,6 +726,37 @@ void handle_task_fd(struct socketDetails *sd) {
 }
 
 // -------------------- UTILS --------------------
+
+/**
+ * Finds the task with the given task ID
+ * Returns index of task in the task list
+ * Returns NO if the task is not found
+ */
+int findTask(int taskID) {
+	for (int i = 0; i < taskListLength; i++) {
+		if (taskList[i].filled == 1 && taskList[i].taskID == taskID) {
+			return i;
+		}
+	}
+
+	return NO;
+}
+
+/**
+ * This adds the sd to all the tasks with this worker
+ */
+void modifyTaskSd(struct socketDetails *sd, struct sockaddr_in *given_addr) {
+	if (given_addr == NULL) {
+		given_addr = addr;
+	}
+
+	for (int i = 0; i < taskListLength; i++) {
+		if (taskList[i].filled == 1 &&
+			memcmp(&taskList[i].addr, given_addr, addrLen) == 0) {
+			taskList[i].sd = sd;
+		}
+	}
+}
 
 /**
  * Removes monitors which haven't sent a heartbeat
@@ -639,7 +896,7 @@ void addMonitorNode() {
  * Sends a find node packet to a monitor to
  * get lowest loaded worker node address
  */
-int processTaskPacket(struct socketDetails *sd) {
+int processTaskPacket() {
 	if (isFull() == YES) {
 		sendCancelTaskPacket(tp->taskID, NULL);
 		return NO;
@@ -661,7 +918,6 @@ int processTaskPacket(struct socketDetails *sd) {
 		// no connection exists, create one
 		struct socketDetails *newSd =
 			amalloc(&arena, sizeof(struct socketDetails));
-		memcpy(newSd, sd, sizeof(struct socketDetails));
 		newSd->fd = gateway_fd;
 		newSd->handler = handle_gateway_fd;
 		newSd->data = NULL;

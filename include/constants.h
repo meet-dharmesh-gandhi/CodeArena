@@ -42,6 +42,7 @@ enum NodeTypes {
 #define YES -1
 #define NO -2
 #define UNKNOWN -3
+#define ERROR -4
 
 #define PACKET_ID 0xCAF1 // CAF1 = CAP = Code Arena Project :)
 #define LARGEST_PACKET sizeof(struct buddy_heartbeat_packet)
@@ -66,6 +67,10 @@ enum NodeTypes {
 #define MIN_MONITORS 1
 #define MIN_WORKERS 1
 #define MAX_DATA_CAPACITY 256 // bytes
+
+#define EPOLL_DESTROY (EPOLLHUP | EPOLLRDHUP | EPOLLERR)
+#define EPOLL_IN (EPOLLIN | EPOLLET)
+#define EPOLL_OUT (EPOLLOUT | EPOLLET)
 
 #define DISCOVER_PORT "8000" // to discover a monitor on start
 #define TASK_PORT "8001" // handles everything with task, tcp and udp sockets
@@ -107,7 +112,9 @@ struct TaskDetail {
 	int fd;
 	int isBuddyTask;
 	struct sockaddr_in
-		addr;		   // worker addr for assigner and assigner addr for gateway
+		addr; // worker addr for assigner and assigner addr for gateway
+	struct socketDetails
+		*sd;		   // worker sd for assigner and assigner sd for gateway
 	int lastConnected; // only for a worker
 };
 
