@@ -120,8 +120,8 @@ int main(int argc, char const *argv[]) {
 	accept_buddy_fd = getNewSocket(BUDDY_PORT, SOCKET_TIMEOUT, SOCK_STREAM);
 	accept_worker_fd = getNewSocket(TASK_PORT, SOCKET_TIMEOUT, SOCK_STREAM);
 
-	timer_fd =
-		getNewTimerFD(CLOCK_MONOTONIC, HEARTBEAT_INTERVAL, HEARTBEAT_INTERVAL);
+	timer_fd = getNewTimerFD(CLOCK_MONOTONIC, HEARTBEAT_INTERVAL,
+							 HEARTBEAT_INTERVAL, 1);
 
 	fd_buf = amalloc(&arena, fdBufSize);
 

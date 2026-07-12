@@ -16,7 +16,7 @@ struct sockaddr_in *broadcastAddr;
 struct sockaddr_in *addr;
 const int addrLen = sizeof(struct sockaddr_in);
 
-int discover_fd, role_fd, hb_fd, timer_fd;
+int discover_fd, role_fd, hb_fd, timer_fd, role_timer_fd;
 
 struct generic_packet *gp;
 const int gp_size = sizeof(struct generic_packet);
@@ -28,6 +28,9 @@ struct heartbeat_packet *hp;
 const int hp_size = sizeof(struct heartbeat_packet);
 struct find_monitor_packet *fmp;
 const int fmp_size = sizeof(struct find_monitor_packet);
+
+struct socketDetails *role_timer_fd_sd;
+int role_timer_on;
 
 int main(int argc, char const *argv[]) {
 	UID = randInt(-1, MAX_UID);
@@ -53,8 +56,17 @@ int main(int argc, char const *argv[]) {
 	role_fd = getNewSocket(ROLE_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
 	hb_fd = getNewSocket(HEARTBEAT_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
 
-	timer_fd =
-		getNewTimerFD(CLOCK_MONOTONIC, HEARTBEAT_INTERVAL, HEARTBEAT_INTERVAL);
+	timer_fd = getNewTimerFD(CLOCK_MONOTONIC, HEARTBEAT_INTERVAL,
+							 HEARTBEAT_INTERVAL, 1);
+	// generates a jitter between 1000ms and 50ms
+	int jitter = getJitter(1000, 50);
+	role_timer_fd = getNewTimerFD(CLOCK_MONOTONIC, jitter, jitter, 1);
+
+	role_timer_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
+	role_timer_fd_sd->fd = role_timer_fd;
+	role_timer_fd_sd->handler = handle_role_timer_fd;
+	role_timer_fd_sd->data = NULL;
+	role_timer_on = 0;
 
 	gp = amalloc(&arena, gp_size);
 	pp = amalloc(&arena, pp_size);
@@ -63,6 +75,13 @@ int main(int argc, char const *argv[]) {
 	fmp = amalloc(&arena, fmp_size);
 
 	return 0;
+}
+
+void handle_role_timer_fd(struct socketDetails *sd) {
+	readTimerFD(role_timer_fd);
+
+	// now become a monitor
+	morph(MONITOR_NODE);
 }
 
 void handle_timer_fd(struct socketDetails *sd) {
@@ -122,15 +141,26 @@ void handle_role_fd(struct socketDetails *sd) {
 
 // -------------------- UTILS --------------------
 
+/**
+ * Sends self heartbeat on broadcast
+ * Also starts the timer if no monitor is found
+ * And if the monitor is there, it turns off the timer
+ */
 void sendHeartbeat() {
 	if (getCurrTime() - *monitorLastShouted > EXPIRE_PERIOD) {
 		memcpy(monitorAddr, emptyAddr, addrLen);
 	}
 
 	if (memcmp(monitorAddr, emptyAddr, addrLen) == 0) {
-		// TODO add a small jitter before doing this
-		morph(MONITOR_NODE);
+		// add role_timer_fd to epoll
+		addFDToEpoll(role_timer_fd, EPOLLET | EPOLLONESHOT, role_timer_fd_sd);
+		role_timer_on = 1;
 		return;
+	}
+
+	if (role_timer_on == 1) {
+		deleteFDInEpoll(role_timer_fd);
+		role_timer_on = 0;
 	}
 
 	hp->packet_ID = PACKET_ID;

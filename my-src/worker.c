@@ -76,8 +76,8 @@ int main(int argc, char const *argv[]) {
 
 	assigner_fd = getNewSocket(TASK_PORT, SOCKET_TIMEOUT, SOCK_STREAM);
 
-	timer_fd =
-		getNewTimerFD(CLOCK_MONOTONIC, HEARTBEAT_INTERVAL, HEARTBEAT_INTERVAL);
+	timer_fd = getNewTimerFD(CLOCK_MONOTONIC, HEARTBEAT_INTERVAL,
+							 HEARTBEAT_INTERVAL, 1);
 
 	assignerBuf = amalloc(&arena, assignerBufSize);
 	assignerBufPtr = amalloc(&arena, sizeof(int));

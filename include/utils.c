@@ -21,6 +21,14 @@ int randInt(int fallback, int max) {
 }
 
 /**
+ * Gives a small jitter time between `minJitter`
+ * and `maxJitter`
+ */
+int getJitter(int maxJitter, int minJitter) {
+	return randInt(minJitter, maxJitter - minJitter) + minJitter;
+}
+
+/**
  * This function reads and writes a shared variable using mutexes.
  */
 void manipulate_value(void *dest, const void *src, size_t n,
@@ -140,13 +148,20 @@ int setNonBlocking(int fd) {
 	return EXIT_SUCCESS;
 }
 
-int getNewTimerFD(clockid_t __clock_id, long interval, long period) {
+/**
+ * gets a new timerfd with `interval` and `period`
+ * If isMs is 0, the interval and period are
+ * treated as in nanoseconds
+ * If isMs is 1, the interval and period are
+ * treated as in milliseconds
+ */
+int getNewTimerFD(clockid_t __clock_id, long interval, long period, int isMs) {
 	int timerfd = timerfd_create(__clock_id, TFD_NONBLOCK);
 	struct itimerspec utmr;
 	utmr.it_value.tv_sec = 0;
-	utmr.it_value.tv_nsec = interval;
+	utmr.it_value.tv_nsec = interval * (isMs ? 1000000 : 1);
 	utmr.it_interval.tv_sec = 0;
-	utmr.it_interval.tv_nsec = period;
+	utmr.it_interval.tv_nsec = period * (isMs ? 1000000 : 1);
 	timerfd_settime(timerfd, 0, &utmr, NULL);
 
 	return timerfd;

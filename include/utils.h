@@ -2,6 +2,7 @@
 #define UTILS_H
 #include <pthread.h>
 #include <stdint.h>
+#include <stdlib.h>
 
 extern int randInt(int fallback, int max);
 extern void *manipulate_value(void *dest, const void *src, size_t n,
@@ -17,7 +18,9 @@ extern int max(int a, int b);
 extern int get_index(uint64_t uid, int length);
 extern time_t getCurrTime();
 extern int setNonBlocking(int fd);
-extern int getNewTimerFD(clockid_t __clock_id, long interval, long period);
+extern int getNewTimerFD(clockid_t __clock_id, long interval, long period,
+						 int isMs);
 extern int getNewSocket(const char *port, suseconds_t tv_usec, int type);
+extern int getJitter(int maxJitter, int minJitter);
 
 #endif

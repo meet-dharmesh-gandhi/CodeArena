@@ -62,8 +62,8 @@ int main(int argc, char const *argv[]) {
 	role_fd = getNewSocket(FIND_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
 	monitor_fd = getNewSocket(DISCOVER_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
 
-	timer_fd =
-		getNewTimerFD(CLOCK_MONOTONIC, HEARTBEAT_INTERVAL, HEARTBEAT_INTERVAL);
+	timer_fd = getNewTimerFD(CLOCK_MONOTONIC, HEARTBEAT_INTERVAL,
+							 HEARTBEAT_INTERVAL, 1);
 
 	gp = amalloc(&arena, gp_size);
 	fnp = amalloc(&arena, fnp_size);
