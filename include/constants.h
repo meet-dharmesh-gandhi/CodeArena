@@ -61,11 +61,19 @@ enum NodeTypes {
 #define SOCKET_TIMEOUT 100
 #define MAX_PACKET_RETRIES 3
 
+const int PROMOTE_WORKER_THRESHOLD = ((WORKER_CAPACITY * 80) / 100);
+const int PROMOTE_ASSIGNER_THRESHOLD = ((ASSIGNER_CAPACITY * 80) / 100);
+const int PROMOTE_MONITOR_THRESHOLD = ((MONITOR_CAPACITY * 80) / 100);
+
+const int DEMOTE_WORKER_THRESHOLD = ((WORKER_CAPACITY * 40) / 100);
+const int DEMOTE_ASSIGNER_THRESHOLD = ((ASSIGNER_CAPACITY * 40) / 100);
+const int DEMOTE_MONITOR_THRESHOLD = ((MONITOR_CAPACITY * 40) / 100);
+
+#define MIN_WORKERS 1
 #define MIN_ASSIGNERS 2
+#define MIN_MONITORS 1
 #define MIN_GATEWAYS 1
 #define MAX_GATEWAYS 1
-#define MIN_MONITORS 1
-#define MIN_WORKERS 1
 #define MAX_DATA_CAPACITY 256 // bytes
 
 #define EPOLL_DESTROY (EPOLLHUP | EPOLLRDHUP | EPOLLERR)
@@ -141,10 +149,13 @@ struct MonitorRecord {
 	int UID;
 	int min_load_worker;
 	int min_load_assigner;
+	int gateway_load;
 	time_t lastShouted;
 	struct sockaddr_in addr;
 	int workers;
 	int assigners;
+	int gateways;
+	int totalNodes;
 };
 
 #pragma pack(push, 1)
@@ -204,8 +215,11 @@ struct monitor_heartbeat_packet {
 	int UID;
 	int min_load_worker;
 	int min_load_assigner;
+	int gateway_load;
 	int workers;
 	int assigners;
+	int gateways;
+	int totalNodes;
 	int has_assigner_without_buddy;
 };
 

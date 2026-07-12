@@ -99,13 +99,15 @@ void manipulate_value_cond(void *dest, const void *src, size_t n,
 }
 
 int divideCeil(int numerator, int denominator) {
-	int rem = numerator % denominator;
-	return (int)((numerator - rem) / denominator) + limit(rem, 0, 1);
+	return (numerator < 0) == (denominator < 0)
+			   ? (numerator / denominator)
+			   : ((numerator / denominator) - 1);
 }
 
 int divideFloor(int numerator, int denominator) {
-	int rem = numerator % denominator;
-	return (int)((numerator - rem) / denominator);
+	return (numerator < 0) == (denominator < 0)
+			   ? ((numerator / denominator) + 1)
+			   : (numerator / denominator);
 }
 
 int limit(int num, int lowest, int highest) {

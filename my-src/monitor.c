@@ -32,6 +32,10 @@ struct heartbeat_packet *hb;
 const int hb_size = sizeof(struct heartbeat_packet);
 struct monitor_heartbeat_packet *mhb;
 const int mhb_size = sizeof(struct monitor_heartbeat_packet);
+struct demotion_packet *dp;
+const int dp_size = sizeof(struct demotion_packet);
+struct promotion_packet *pp;
+const int pp_size = sizeof(struct promotion_packet);
 
 int main(int argc, char const *argv[]) {
 	UID = UID = randInt(-1, MAX_UID);
@@ -66,6 +70,8 @@ int main(int argc, char const *argv[]) {
 	fonp = amalloc(&arena, fonp_size);
 	hb = amalloc(&arena, hb_size);
 	mhb = amalloc(&arena, mhb_size);
+	dp = amalloc(&arena, dp_size);
+	pp = amalloc(&arena, pp_size);
 
 	return 0;
 }
@@ -78,6 +84,9 @@ void handle_timer_fd(struct socketDetails *sd) {
 
 	// cleanup
 	cleanUpNodes();
+
+	// send role packets
+	sendRolePackets();
 }
 
 void handle_role_fd(struct socketDetails *sd) {
@@ -220,14 +229,226 @@ void cleanUpNodes() {
 	}
 }
 
-// TODO write the promotion and demotion functions
-void sendPromotionPackets() {
+/**
+ * Sends promotion / demotion packets to
+ * nodes in the system
+ */
+void sendRolePackets() {
 	// first check if this is the highest UID node
-	if (haveHighestUID == NO) {
+	if (haveHighestUID() == NO) {
 		return;
 	}
 
-	// only empty nodes, worker or self can be promoted
+	int assigners = getTotalNodes(ASSIGNER_NODE);
+	int workers = getTotalNodes(ASSIGNER_NODE);
+	int emptyNodes = getTotalNodes(EMPTY_NODE);
+	int monitors = getTotalNodes(MONITOR_NODE);
+	int tasks = getGatewayLoad();
+
+	// for promotion
+	int promotionExpectedAssigners =
+		divideCeil(tasks, PROMOTE_ASSIGNER_THRESHOLD);
+	int promotionExpectedWorkers = divideCeil(tasks, PROMOTE_WORKER_THRESHOLD);
+
+	// for demotion
+	int demotionExpectedMonitors = divideCeil(tasks, DEMOTE_MONITOR_THRESHOLD);
+	int demotionExpectedAssigners =
+		divideCeil(tasks, DEMOTE_ASSIGNER_THRESHOLD);
+	int demotionExpectedWorkers = divideCeil(tasks, DEMOTE_WORKER_THRESHOLD);
+
+	// check for promotions first
+
+	// check if there is a gateway
+	int gateways = getGlobalNodes(GATEWAY_NODE);
+	if (gateways < 1) {
+		// no gateway, become the gateway
+		morph(GATEWAY_NODE);
+	}
+
+	if (promotionExpectedAssigners > assigners) {
+		// need to promote empty nodes or worker nodes
+		if (promotionExpectedWorkers < workers) {
+			// workers are extra, promote one of them
+			sendPromotePacket(WORKER_NODE, ASSIGNER_NODE);
+		} else if (emptyNodes > 0) {
+			// promote an empty node
+			sendPromotePacket(EMPTY_NODE, ASSIGNER_NODE);
+			emptyNodes--;
+		}
+	}
+
+	if (promotionExpectedWorkers > workers) {
+		// need to promote empty nodes
+		if (emptyNodes > 0) {
+			sendPromotePacket(EMPTY_NODE, WORKER_NODE);
+			emptyNodes--;
+		}
+	}
+
+	// now check for demotions
+
+	// check for gateways first
+	if (gateways > 1) {
+		sendDemotePackets(GATEWAY_NODE, gateways - 1);
+	}
+
+	// then check for monitors
+	if (demotionExpectedMonitors < monitors) {
+		// too many monitors
+		sendDemotePackets(MONITOR_NODE, monitors - demotionExpectedMonitors);
+	}
+
+	// check for assigners
+	if (demotionExpectedAssigners < assigners) {
+		// too many assigners
+		sendDemotePackets(ASSIGNER_NODE, assigners - demotionExpectedAssigners);
+	}
+
+	// finally check for workers
+	if (demotionExpectedWorkers < workers) {
+		// too many workers
+		sendDemotePackets(WORKER_NODE, workers - demotionExpectedWorkers);
+	}
+}
+
+/**
+ * Sends promote packets to the monitor with the
+ * highest amount of `nodeType` nodes
+ */
+void sendPromotePacket(int nodeType, int targetNodeType) {
+	int maxNodes = 0;
+	struct sockaddr_in *node_addr;
+
+	for (int i = 0; i < monitorListLength; i++) {
+		if (monitorList[i].filled == 1) {
+			switch (nodeType) {
+			case WORKER_NODE:
+				if (maxNodes > monitorList[i].workers) {
+					maxNodes = monitorList[i].workers;
+					node_addr = &monitorList[i].addr;
+				}
+				break;
+			case EMPTY_NODE:
+				if (maxNodes >
+					monitorList[i].totalNodes - monitorList[i].assigners -
+						monitorList[i].workers - monitorList[i].gateways) {
+					maxNodes = monitorList[i].totalNodes -
+							   monitorList[i].assigners -
+							   monitorList[i].workers - monitorList[i].gateways;
+					node_addr = &monitorList[i].addr;
+				}
+				break;
+			default:
+				break;
+			}
+		}
+	}
+
+	deliverPromotePacket(nodeType, targetNodeType, node_addr);
+}
+
+/**
+ * Sends demote packets to all the monitors to demote the node
+ * in a round robin fashion
+ * If the monitors are to be demoted, then it sends demote
+ * packets to the monitors in a round robin fashion
+ */
+void sendDemotePackets(int nodeType, int nodes) {
+	int nodeCounts[monitorListLength];
+	int i = 0;
+	int iters = 0;
+	while (1) {
+		if (iters == nodes) {
+			break;
+		}
+
+		if (monitorList[i].filled == 1) {
+			switch (nodeType) {
+			case ASSIGNER_NODE:
+				if (monitorList[i].assigners - nodeCounts[i] > 0) {
+					nodeCounts[i]++;
+				}
+				break;
+			case WORKER_NODE:
+				if (monitorList[i].workers - nodeCounts[i] > 0) {
+					nodeCounts[i]++;
+				}
+				break;
+			case MONITOR_NODE:
+				if (nodeCounts[i] == 0) {
+					nodeCounts[i]++;
+				}
+				break;
+			default:
+				break;
+			}
+		}
+		i = (i + 1) % monitorListLength;
+		iters++;
+	}
+
+	for (int i = 0; i < monitorListLength; i++) {
+		deliverDemotePacket(nodeType, nodeCounts[i], &monitorList[i].addr);
+	}
+}
+
+/**
+ * Delivers a promote packet to `given_addr`
+ */
+void deliverPromotePacket(int promoted_node_type, int target_node_type,
+						  struct sockaddr_in *given_addr) {
+	pp->packet_ID = PACKET_ID;
+	pp->packet_type = DEMOTE_PACKET;
+	pp->node_type = MONITOR_NODE;
+	pp->UID = UID;
+	pp->promoted_node_type = promoted_node_type;
+	pp->target_node_type = target_node_type;
+
+	sendto(role_fd, pp, pp_size, 0, given_addr, addrLen);
+}
+
+/**
+ * Delivers a demote packet to `given_addr`
+ */
+void deliverDemotePacket(int demoted_node_type, int nodes_to_demote,
+						 struct sockaddr_in *given_addr) {
+	dp->packet_ID = PACKET_ID;
+	dp->packet_type = DEMOTE_PACKET;
+	dp->node_type = MONITOR_NODE;
+	dp->UID = UID;
+	dp->nodes_to_demote = nodes_to_demote;
+	dp->demoted_node_type = demoted_node_type;
+
+	sendto(role_fd, dp, dp_size, 0, given_addr, addrLen);
+}
+
+/**
+ * Returns the number of `nodeType` nodes in the entire system
+ */
+int getGlobalNodes(int nodeType) {
+	int cnt = 0;
+	for (int i = 0; i < monitorListLength; i++) {
+		if (monitorList[i].filled == 1) {
+			switch (nodeType) {
+			case GATEWAY_NODE:
+				cnt += monitorList[i].gateways;
+				break;
+			case ASSIGNER_NODE:
+				cnt += monitorList[i].assigners;
+				break;
+			case WORKER_NODE:
+				cnt += monitorList[i].workers;
+				break;
+			case MONITOR_NODE:
+				cnt++;
+				break;
+			default:
+				break;
+			}
+		}
+	}
+
+	return cnt;
 }
 
 /**
@@ -261,9 +482,27 @@ void sendHeartbeat() {
 	mhb->min_load_worker = workerInd == NO ? -1 : nodeList[workerInd].load;
 	mhb->assigners = getTotalNodes(ASSIGNER_NODE);
 	mhb->workers = getTotalNodes(WORKER_NODE);
+	mhb->gateways = getTotalNodes(GATEWAY_NODE);
+	mhb->totalNodes = mhb->assigners + mhb->workers + mhb->gateways +
+					  getTotalNodes(EMPTY_NODE);
+	mhb->gateway_load = getGatewayLoad();
 
 	// broadcast the heartbeat
 	sendto(hb_fd, mhb, mhb_size, 0, broadcastAddr, addrLen);
+}
+
+/**
+ * Returns gateway load if the gateway exists
+ * If the gateway does not exist, returns -1
+ */
+int getGatewayLoad() {
+	for (int i = 0; i < nodeListLength; i++) {
+		if (nodeList[i].filled == 1 && nodeList[i].nodeType == GATEWAY_NODE) {
+			return nodeList[i].load;
+		}
+	}
+
+	return -1;
 }
 
 int getTotalNodes(int nodeType) {
@@ -290,14 +529,24 @@ void registerMonitorHeartbeat() {
 		// new monitor
 		monitorList[emptyNode].filled = 1;
 		monitorList[emptyNode].UID = mhb->UID;
+		memcpy(&monitorList[emptyNode].addr, addr, addrLen);
 		monitorList[emptyNode].min_load_assigner = mhb->min_load_assigner;
 		monitorList[emptyNode].min_load_worker = mhb->min_load_worker;
+		monitorList[emptyNode].gateway_load = mhb->gateway_load;
+		monitorList[emptyNode].assigners = mhb->assigners;
+		monitorList[emptyNode].gateways = mhb->gateways;
+		monitorList[emptyNode].workers = mhb->workers;
+		monitorList[emptyNode].totalNodes = mhb->totalNodes;
 		monitorList[emptyNode].lastShouted = getCurrTime();
-		memcpy(&monitorList[emptyNode].addr, addr, addrLen);
 	} else if (nodeInd != NO) {
 		// existing monitor
 		monitorList[nodeInd].min_load_assigner = mhb->min_load_assigner;
 		monitorList[nodeInd].min_load_worker = mhb->min_load_worker;
+		monitorList[emptyNode].gateway_load = mhb->gateway_load;
+		monitorList[emptyNode].assigners = mhb->assigners;
+		monitorList[emptyNode].gateways = mhb->gateways;
+		monitorList[emptyNode].workers = mhb->workers;
+		monitorList[emptyNode].totalNodes = mhb->totalNodes;
 		monitorList[nodeInd].lastShouted = getCurrTime();
 	}
 }
