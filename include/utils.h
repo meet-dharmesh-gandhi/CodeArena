@@ -20,6 +20,8 @@ extern time_t getCurrTime();
 extern int setNonBlocking(int fd);
 extern int getNewTimerFD(clockid_t __clock_id, long interval, long period,
 						 int isMs);
+extern void startTimerFD(int timerfd, long interval, long period, int isMs);
+extern void stopTimerFD(int timerfd);
 extern int getNewSocket(const char *port, suseconds_t tv_usec, int type);
 extern int getJitter(int maxJitter, int minJitter);
 

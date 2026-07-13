@@ -167,6 +167,30 @@ int getNewTimerFD(clockid_t __clock_id, long interval, long period, int isMs) {
 	return timerfd;
 }
 
+int createTimerFD(clockid_t __clock_id, long interval, long period, int isMs) {
+	int timerfd = timerfd_create(__clock_id, TFD_NONBLOCK);
+
+	return timerfd;
+}
+
+void startTimerFD(int timerfd, long interval, long period, int isMs) {
+	struct itimerspec utmr;
+	utmr.it_value.tv_sec = 0;
+	utmr.it_value.tv_nsec = interval * (isMs ? 1000000 : 1);
+	utmr.it_interval.tv_sec = 0;
+	utmr.it_interval.tv_nsec = period * (isMs ? 1000000 : 1);
+	timerfd_settime(timerfd, 0, &utmr, NULL);
+}
+
+void stopTimerFD(int timerfd) {
+	struct itimerspec utmr;
+	utmr.it_value.tv_sec = 0;
+	utmr.it_value.tv_nsec = 0;
+	utmr.it_interval.tv_sec = 0;
+	utmr.it_interval.tv_nsec = 0;
+	timerfd_settime(timerfd, 0, &utmr, NULL);
+}
+
 int getNewSocket(const char *port, suseconds_t tv_usec, int type) {
 	int sock;
 	if (type == SOCK_DGRAM) {

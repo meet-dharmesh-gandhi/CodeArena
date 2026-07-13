@@ -4,19 +4,14 @@ int UID;
 
 Arena arena;
 
-struct TaskDetail *taskList;
-const int taskListLength = sizeof(struct TaskDetail) * WORKER_CAPACITY;
+struct WorkerTaskDetail *taskList;
+const int taskListLength = sizeof(struct WorkerTaskDetail) * WORKER_CAPACITY;
 struct ExpectedConnection *expectedConnectionsList;
 const int expectedConnectionsListLength =
 	sizeof(struct ExpectedConnection) * WORKER_CAPACITY;
 
 uint8_t *fd_buf;
 const int fdBuf_size = sizeof(uint8_t) * LARGEST_PACKET;
-uint8_t *buf;
-const int buf_size = sizeof(uint8_t) * BUFFER_SIZE * WORKER_CAPACITY;
-uint8_t *assignerBuf;
-const int assignerBufSize = sizeof(uint8_t) * sizeof(struct io_packet);
-int *assignerBufPtr;
 
 int task_fd, discover_fd, hb_fd, assigner_fd, role_fd, timer_fd;
 
@@ -45,6 +40,10 @@ struct heartbeat_packet *hb;
 const int hb_size = sizeof(struct heartbeat_packet);
 struct io_packet *iop;
 const int iop_size = sizeof(struct io_packet);
+struct task_over_packet *taop;
+const int taop_size = sizeof(struct task_over_packet);
+
+extern void run_container();
 
 int main(int argc, char const *argv[]) {
 	UID = randInt(-1, MAX_UID);
@@ -57,8 +56,6 @@ int main(int argc, char const *argv[]) {
 
 	taskList = amalloc(&arena, taskListLength);
 	expectedConnectionsList = amalloc(&arena, expectedConnectionsListLength);
-
-	buf = amalloc(&arena, BUFFER_SIZE);
 
 	monitor_last_shouted = amalloc(&arena, monitor_last_shouted_size);
 
@@ -79,10 +76,6 @@ int main(int argc, char const *argv[]) {
 	timer_fd = getNewTimerFD(CLOCK_MONOTONIC, HEARTBEAT_INTERVAL,
 							 HEARTBEAT_INTERVAL, 1);
 
-	assignerBuf = amalloc(&arena, assignerBufSize);
-	assignerBufPtr = amalloc(&arena, sizeof(int));
-	*assignerBufPtr = 0;
-
 	gp = amalloc(&arena, gp_size);
 	tp = amalloc(&arena, tp_size);
 	ctp = amalloc(&arena, ctp_size);
@@ -92,6 +85,130 @@ int main(int argc, char const *argv[]) {
 	hb = amalloc(&arena, hb_size);
 
 	return 0;
+}
+
+void handle_container(struct socketDetails *sd) {
+	struct WorkerTaskDetail *wtd = (struct WorkerTaskDetail *)sd->data;
+	if (sd->events & EPOLLOUT) {
+		// ready to receive output
+		int required = iop_size - wtd->assigner_buf_ptr;
+		int sent = send(wtd->worker_fd, &wtd->assigner_buf, required, 0);
+
+		if (sent < required) {
+			wtd->assigner_buf_ptr += max(sent, 0);
+			return;
+		}
+
+		wtd->assigner_buf_ptr = -1;
+
+		while (1) {
+			int packet_type = getPacketType(sd->fd, &wtd->assigner_buf,
+											&wtd->assigner_buf_ptr);
+
+			if (packet_type == IO_PACKET) {
+				// copy to iop
+				int done = getPacketData(sd->fd, &wtd->assigner_buf,
+										 &wtd->assigner_buf_ptr, iop, iop_size);
+
+				if (done == YES) {
+					// TODO process the packet
+					int sent = send(wtd->worker_fd, iop, iop_size, 0);
+
+					if (sent < iop_size) {
+						wtd->assigner_buf_ptr = max(sent, 0);
+						memcpy(&wtd->assigner_buf, iop, iop_size);
+						break;
+					}
+				}
+			} else if (packet_type == RESUME_TASK_PACKET) {
+				// copy to rtwp
+				int done =
+					getPacketData(sd->fd, &wtd->assigner_buf,
+								  &wtd->assigner_buf_ptr, rtwp, rtwp_size);
+
+				if (done == YES) {
+					// add this task to the task list
+					int tdId = findTask(rtwp->taskID);
+					if (tdId == -1) {
+						// task list full
+						sendCancelTaskTCPPacket(rtwp->taskID, sd->fd);
+					}
+
+					unmarkTask(rtwp->taskID);
+
+					taskList[tdId].assigner_fd = sd->fd;
+					taskList[tdId].assigner_buf_ptr = -1;
+					taskList[tdId].worker_buf_ptr = -1;
+				}
+			} else if (packet_type == CANCEL_TASK_PACKET) {
+				// copy to ctp
+				int done = getPacketData(sd->fd, &wtd->assigner_buf,
+										 &wtd->assigner_buf_ptr, ctp, ctp_size);
+
+				if (done == YES) {
+					shutdown(sd->fd, SHUT_RDWR);
+					removeFromTaskList(ctp->taskID);
+				}
+			} else if (packet_type == TASK_PACKET) {
+				// copy to tp
+				int done = getPacketData(sd->fd, &wtd->assigner_buf,
+										 &wtd->assigner_buf_ptr, tp, tp_size);
+
+				if (done == YES) {
+					struct WorkerTaskDetail *wtd =
+						addToTaskList(tp->taskID, sd->fd);
+
+					if (wtd == NULL) {
+						sendCancelTaskTCPPacket(tp->taskID, sd->fd);
+						return;
+					}
+
+					createContainer(wtd);
+				}
+			} else if (packet_type == ERROR) {
+				modifyFDInEpoll(wtd->assigner_fd, EPOLL_IN | EPOLL_DESTROY,
+								wtd->assigner_sd);
+				modifyFDInEpoll(wtd->worker_fd, EPOLL_IN | EPOLL_DESTROY,
+								wtd->worker_sd);
+
+				break;
+			}
+		}
+	} else if (sd->events & EPOLL_DESTROY) {
+		// container destroyed
+		// send a task over packet
+		sendTaskOverPacket(wtd);
+	} else if (sd->events & EPOLLIN) {
+		// incoming data, forward to assigner
+		while (1) {
+			int packet_type = getPacketType(wtd->worker_fd, &wtd->worker_buf,
+											&wtd->worker_buf_ptr);
+
+			if (packet_type == IO_PACKET) {
+				int done = getPacketData(wtd->worker_fd, &wtd->worker_buf,
+										 &wtd->worker_buf_ptr, iop, iop_size);
+
+				if (done == YES) {
+					int sent = send(wtd->assigner_fd, iop, iop_size, 0);
+
+					if (sent < iop_size) {
+						wtd->worker_buf_ptr += max(sent, 0);
+						memcpy(&wtd->worker_buf, iop, iop_size);
+
+						modifyFDInEpoll(wtd->assigner_fd,
+										EPOLL_OUT | EPOLL_DESTROY,
+										wtd->assigner_sd);
+						modifyFDInEpoll(wtd->worker_fd, EPOLLET | EPOLL_DESTROY,
+										wtd->worker_sd);
+
+						break;
+					}
+				}
+			} else if (packet_type == ERROR) {
+				break;
+			}
+		}
+	}
 }
 
 void handle_timer_fd(struct socketDetails *sd) {
@@ -125,50 +242,126 @@ void handle_role_fd(struct socketDetails *sd) {
 }
 
 void handle_assigner_fd(struct socketDetails *sd) {
+	struct WorkerTaskDetail *wtd = (struct WorkerTaskDetail *)sd->data;
 	if (sd->events & EPOLLOUT) {
-		// fd connected, switch to EPOLLIN
-		modifyFDInEpoll(
-			sd->fd, EPOLLIN | EPOLLET | EPOLLERR | EPOLLRDHUP | EPOLLHUP, sd);
+		// ready to receive output
+		int required = iop_size - wtd->worker_buf_ptr;
+		int sent = send(wtd->assigner_fd, &wtd->worker_buf, required, 0);
+
+		if (sent < required) {
+			wtd->worker_buf_ptr += max(sent, 0);
+			return;
+		}
+
+		wtd->worker_buf_ptr = -1;
+
+		while (1) {
+			int packet_type = getPacketType(wtd->worker_fd, &wtd->worker_buf,
+											&wtd->worker_buf_ptr);
+
+			if (packet_type == IO_PACKET) {
+				int done = getPacketData(wtd->worker_fd, &wtd->worker_buf,
+										 &wtd->worker_buf_ptr, iop, iop_size);
+
+				if (done == YES) {
+					int sent = send(wtd->assigner_fd, iop, iop_size, 0);
+
+					if (sent < iop_size) {
+						wtd->worker_buf_ptr += max(sent, 0);
+						memcpy(&wtd->worker_buf, iop, iop_size);
+
+						modifyFDInEpoll(wtd->assigner_fd,
+										EPOLL_OUT | EPOLL_DESTROY,
+										wtd->assigner_sd);
+						modifyFDInEpoll(wtd->worker_fd, EPOLLET | EPOLL_DESTROY,
+										wtd->worker_sd);
+
+						break;
+					}
+				}
+			} else if (packet_type == ERROR) {
+				break;
+			}
+		}
 	} else if (sd->events & (EPOLLERR | EPOLLRDHUP | EPOLLHUP)) {
 		// assigner lost contact...
 		// wait for buddy to send a connection
 		markTasks(sd->fd);
 	} else if (sd->events & EPOLLIN) {
 		while (1) {
-			int packet_type =
-				getPacketType(sd->fd, assignerBuf, assignerBufPtr);
+			int packet_type = getPacketType(sd->fd, &wtd->assigner_buf,
+											&wtd->assigner_buf_ptr);
 
 			if (packet_type == IO_PACKET) {
 				// copy to iop
-				int done = getPacketData(sd->fd, assignerBuf, assignerBufPtr,
-										 iop, iop_size);
+				int done = getPacketData(sd->fd, &wtd->assigner_buf,
+										 &wtd->assigner_buf_ptr, iop, iop_size);
 
 				if (done == YES) {
 					// TODO process the packet
+					int sent = send(wtd->worker_fd, iop, iop_size, 0);
+
+					if (sent < iop_size) {
+						wtd->assigner_buf_ptr = max(sent, 0);
+						memcpy(&wtd->assigner_buf, iop, iop_size);
+
+						modifyFDInEpoll(wtd->worker_fd,
+										EPOLL_OUT | EPOLL_DESTROY,
+										wtd->worker_sd);
+						modifyFDInEpoll(wtd->assigner_fd,
+										EPOLL_DESTROY | EPOLLET,
+										wtd->assigner_sd);
+
+						break;
+					}
 				}
 			} else if (packet_type == RESUME_TASK_PACKET) {
 				// copy to rtwp
-				int done = getPacketData(sd->fd, assignerBuf, assignerBufPtr,
-										 rtwp, rtwp_size);
+				int done =
+					getPacketData(sd->fd, &wtd->assigner_buf,
+								  &wtd->assigner_buf_ptr, rtwp, rtwp_size);
 
 				if (done == YES) {
 					// add this task to the task list
-					if (addToTaskList(rtwp->taskID, sd->fd, addr) == NO) {
+					int tdId = findTask(rtwp->taskID);
+					if (tdId == -1) {
 						// task list full
 						sendCancelTaskTCPPacket(rtwp->taskID, sd->fd);
 					}
 
 					unmarkTask(rtwp->taskID);
+
+					taskList[tdId].assigner_fd = sd->fd;
+					taskList[tdId].assigner_buf_ptr = -1;
+					taskList[tdId].worker_buf_ptr = -1;
 				}
 			} else if (packet_type == CANCEL_TASK_PACKET) {
 				// copy to ctp
-				int done = getPacketData(sd->fd, assignerBuf, assignerBufPtr,
-										 ctp, ctp_size);
+				int done = getPacketData(sd->fd, &wtd->assigner_buf,
+										 &wtd->assigner_buf_ptr, ctp, ctp_size);
 
 				if (done == YES) {
 					shutdown(sd->fd, SHUT_RDWR);
 					removeFromTaskList(ctp->taskID);
 				}
+			} else if (packet_type == TASK_PACKET) {
+				// copy to tp
+				int done = getPacketData(sd->fd, &wtd->assigner_buf,
+										 &wtd->assigner_buf_ptr, tp, tp_size);
+
+				if (done == YES) {
+					struct WorkerTaskDetail *wtd =
+						addToTaskList(tp->taskID, sd->fd);
+
+					if (wtd == NULL) {
+						sendCancelTaskTCPPacket(tp->taskID, sd->fd);
+						return;
+					}
+
+					createContainer(wtd);
+				}
+			} else if (packet_type == ERROR) {
+				break;
 			}
 		}
 	}
@@ -209,32 +402,34 @@ void handle_task_fd(struct socketDetails *sd) {
 				memcpy(tp, fd_buf, tp_size);
 
 				// check if the worker is full
-				if (isFull() == YES) {
+				struct WorkerTaskDetail *wtd =
+					addToTaskList(tp->taskID, sd->fd);
+				if (wtd == NULL) {
 					// send a cancel task packet
 					sendCancelTaskPacket(tp->taskID, addr);
-				} else {
-					// send a tcp request
-					struct socketDetails *newSd =
-						amalloc(&arena, sizeof(struct socketDetails));
-					newSd->fd = task_fd;
-					newSd->handler = handle_assigner_fd;
-					newSd->data = NULL;
-					requestTCPConnection(task_fd, addr, newSd);
-				}
-			} else if (packet_type == RESUME_TASK_PACKET) {
-				// add this task to the task list
-				if (addToTaskList(rtwp->taskID, sd->fd, addr) == NO) {
-					// task list full
-					sendCancelTaskPacket(rtwp->taskID, addr);
 				}
 
 				// send a tcp request
-				struct socketDetails *newSd =
-					amalloc(&arena, sizeof(struct socketDetails));
-				newSd->fd = task_fd;
-				newSd->handler = handle_assigner_fd;
-				newSd->data = NULL;
-				requestTCPConnection(task_fd, addr, newSd);
+				requestTCPConnection(task_fd, addr, wtd->assigner_sd);
+
+				// create a new container
+				createContainer(wtd);
+			} else if (packet_type == RESUME_TASK_PACKET) {
+				// update the task
+				int tdId = findTask(rtwp->taskID);
+				if (tdId == -1) {
+					// task not found
+					sendCancelTaskPacket(rtwp->taskID, addr);
+				}
+
+				unmarkTask(rtwp->taskID);
+
+				struct WorkerTaskDetail *wtd = &taskList[tdId];
+				wtd->assigner_buf_ptr = -1;
+				wtd->worker_buf_ptr = -1;
+				wtd->assigner_fd = sd->fd;
+				// send a tcp request
+				requestTCPConnection(task_fd, addr, wtd->assigner_fd);
 			}
 		} else if (res != 2) {
 			break;
@@ -243,6 +438,79 @@ void handle_task_fd(struct socketDetails *sd) {
 }
 
 // -------------------- UTILS --------------------
+
+void sendTaskOverPacket(struct WorkerTaskDetail *wtd) {
+	taop->packet_ID = PACKET_ID;
+	taop->packet_type = TASK_OVER_PACKET;
+	taop->node_type = WORKER_NODE;
+	taop->UID = UID;
+	taop->taskID = wtd->taskID;
+
+	send(wtd->assigner_fd, taop, taop_size, 0);
+	shutdown(wtd->assigner_fd, SHUT_RDWR);
+	kill(wtd->container_pid, SIGKILL);
+	wtd->filled = 0;
+}
+
+int createContainer(struct WorkerTaskDetail *wtd) {
+	int uds[2];
+
+	uid_t uid = getuid();
+	gid_t gid = getgid();
+
+	// create uds
+	if (socketpair(AF_UNIX, SOCK_STREAM, 0, uds) == -1) {
+		// uds was not created
+		return;
+	}
+
+	// allocate the stack
+	uint8_t *stack = amalloc(&arena, sizeof(uint8_t) * CONTAINER_STACK_SIZE);
+
+	int container_pid = clone(run_container, stack + CONTAINER_STACK_SIZE,
+							  CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID |
+								  CLONE_NEWUTS | SIGCHLD,
+							  &uds[1]);
+
+	if (container_pid == -1) {
+		// the container was not created
+		return;
+	}
+
+	close(uds[1]);
+
+	// now write uid_map, gid_map and deny path
+	char map_buf[64];
+
+	snprintf(map_buf, sizeof(map_buf), "0 %d 1", uid);
+	writeToPath(map_buf, container_pid, "uid_map");
+	snprintf(map_buf, sizeof(map_buf), "deny");
+	writeToPath(map_buf, container_pid, "setgroups");
+	snprintf(map_buf, sizeof(map_buf), "0 %d 1", gid);
+	writeToPath(map_buf, container_pid, "gid_map");
+
+	wtd->worker_fd = uds[0];
+	wtd->container_pid = container_pid;
+	addFDToEpoll(uds[0], EPOLL_OUT | EPOLL_DESTROY, wtd->worker_sd);
+}
+
+/**
+ * Writes `map_buf` to the file at `/proc/{pid}/{path}`
+ * setting up a container
+ */
+void writeToPath(char *map_buf, int pid, char *path) {
+	char path_buf[64];
+	snprintf(path_buf, sizeof(path_buf), "/proc/%d/%s", pid, path);
+
+	FILE *f = fopen(path_buf, "w");
+
+	if (!f) {
+		return NO;
+	}
+
+	fprintf(f, map_buf);
+	fclose(f);
+}
 
 /**
  * Unmarks exactly one task
@@ -262,11 +530,26 @@ int unmarkTask(int taskID) {
 }
 
 /**
+ * Finds the task using `taskID` in the task list
+ * Returns task index if the task is found
+ * Returns -1 if the task is not found
+ */
+int findTask(int taskID) {
+	for (int i = 0; i < taskListLength; i++) {
+		if (taskList[i].filled == 1 && taskList[i].taskID == taskID) {
+			return i;
+		}
+	}
+
+	return -1;
+}
+
+/**
  * Marks all tasks using `fd`
  */
-void markTasks(int fd) {
+void markTasks(int assigner_fd) {
 	for (int i = 0; i < taskListLength; i++) {
-		if (taskList[i].filled == 1 && taskList[i].fd == fd) {
+		if (taskList[i].filled == 1 && taskList[i].assigner_fd == assigner_fd) {
 			taskList[i].lastConnected = getCurrTime();
 		}
 	}
@@ -350,23 +633,35 @@ int removeFromTaskList(int taskID) {
  * Returns NO if the task was not added
  * Returns YES if the task was added
  */
-int addToTaskList(int taskID, int fd, struct sockaddr_in *given_addr) {
-	if (given_addr == NULL) {
-		given_addr = addr;
-	}
-
+struct WorkerTaskDetail *addToTaskList(int taskID, int assigner_fd) {
 	for (int i = 0; i < taskListLength; i++) {
 		if (taskList[i].filled == 0) {
 			taskList[i].filled = 1;
-			taskList[i].fd = fd;
+			taskList[i].index = i;
 			taskList[i].taskID = taskID;
 			taskList[i].lastConnected = getCurrTime();
-			memcpy(&taskList[i].addr, given_addr, addrLen);
-			return YES;
+			taskList[i].container_pid = -1;
+			taskList[i].assigner_fd = assigner_fd;
+			taskList[i].worker_fd = -1;
+			struct socketDetails *assigner_sd =
+				amalloc(&arena, sizeof(struct socketDetails));
+			assigner_sd->handler = handle_assigner_fd;
+			assigner_sd->data = &taskList[i];
+			assigner_sd->fd = assigner_fd;
+			taskList[i].assigner_sd = assigner_sd;
+			struct socketDetails *worker_sd =
+				amalloc(&arena, sizeof(struct socketDetails));
+			worker_sd->handler = handle_container;
+			worker_sd->data = &taskList[i];
+			worker_sd->fd = -1;
+			taskList[i].worker_sd = worker_sd;
+			taskList[i].assigner_buf_ptr = -1;
+			taskList[i].worker_buf_ptr = -1;
+			return &taskList[i];
 		}
 	}
 
-	return NO;
+	return NULL;
 }
 
 /**

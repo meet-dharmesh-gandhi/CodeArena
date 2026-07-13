@@ -61,6 +61,8 @@ enum NodeTypes {
 #define SOCKET_TIMEOUT 100
 #define MAX_PACKET_RETRIES 3
 
+#define CONTAINER_STACK_SIZE 1024 * 1024 // 1 MB
+
 const int PROMOTE_WORKER_THRESHOLD = ((WORKER_CAPACITY * 80) / 100);
 const int PROMOTE_ASSIGNER_THRESHOLD = ((ASSIGNER_CAPACITY * 80) / 100);
 const int PROMOTE_MONITOR_THRESHOLD = ((MONITOR_CAPACITY * 80) / 100);
@@ -124,6 +126,22 @@ struct TaskDetail {
 	struct socketDetails
 		*sd;		   // worker sd for assigner and assigner sd for gateway
 	int lastConnected; // only for a worker
+};
+
+struct WorkerTaskDetail {
+	int filled;
+	int index;
+	int taskID;
+	int lastConnected;
+	pid_t container_pid;
+	int assigner_fd;
+	int worker_fd;
+	struct socketDetails *assigner_sd;
+	struct socketDetails *worker_sd;
+	uint8_t worker_buf[sizeof(struct io_packet)];
+	int worker_buf_ptr;
+	uint8_t assigner_buf[sizeof(struct io_packet)];
+	int assigner_buf_ptr;
 };
 
 struct TcpSocket {
