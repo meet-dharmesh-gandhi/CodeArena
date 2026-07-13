@@ -32,7 +32,7 @@ const int fmp_size = sizeof(struct find_monitor_packet);
 struct socketDetails *role_timer_fd_sd;
 int role_timer_on;
 
-// TODO ADD LOGS IN EVERY NODE!!
+// TODO ADD LOGS, MEMORY MANAGEMENT IN EVERY NODE!!
 int main(int argc, char const *argv[]) {
 	UID = randInt(-1, MAX_UID);
 
