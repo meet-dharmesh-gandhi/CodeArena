@@ -57,6 +57,10 @@ enum NodeTypes {
 #define STREAM_WAITING_QUEUE 10
 #define ARENA_SIZE 2048
 
+#define MAX_FILE_SIZE 100000 // in bytes
+#define MAX_FILES 30
+#define MAX_FILENAME_SIZE 256 // in bytes
+
 #define EXPIRE_PERIOD (HEARTBEAT_INTERVAL * MAX_MISSES)
 #define SOCKET_TIMEOUT 100
 #define MAX_PACKET_RETRIES 3

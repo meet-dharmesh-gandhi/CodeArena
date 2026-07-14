@@ -43,7 +43,7 @@ const int iop_size = sizeof(struct io_packet);
 struct task_over_packet *taop;
 const int taop_size = sizeof(struct task_over_packet);
 
-extern void run_container();
+extern void run_container(void *arg);
 
 int main(int argc, char const *argv[]) {
 	UID = randInt(-1, MAX_UID);
@@ -181,30 +181,33 @@ void handle_container(struct socketDetails *sd) {
 	} else if (sd->events & EPOLLIN) {
 		// incoming data, forward to assigner
 		while (1) {
-			int packet_type = getPacketType(wtd->worker_fd, &wtd->worker_buf,
-											&wtd->worker_buf_ptr);
+			int required = MAX_DATA_CAPACITY - wtd->worker_buf_ptr;
+			int recved = recv(wtd->worker_fd, &wtd->worker_buf, required, 0);
 
-			if (packet_type == IO_PACKET) {
-				int done = getPacketData(wtd->worker_fd, &wtd->worker_buf,
-										 &wtd->worker_buf_ptr, iop, iop_size);
+			if (recved != required) {
+				break;
+			}
 
-				if (done == YES) {
-					int sent = send(wtd->assigner_fd, iop, iop_size, 0);
+			iop->packet_ID = PACKET_ID;
+			iop->packet_type = IO_PACKET;
+			iop->node_type = WORKER_NODE;
+			iop->UID = UID;
+			iop->task_ID = wtd->taskID;
+			memcpy(&iop->data, &wtd->worker_buf, 0);
 
-					if (sent < iop_size) {
-						wtd->worker_buf_ptr += max(sent, 0);
-						memcpy(&wtd->worker_buf, iop, iop_size);
+			wtd->worker_buf_ptr = 0;
 
-						modifyFDInEpoll(wtd->assigner_fd,
-										EPOLL_OUT | EPOLL_DESTROY,
-										wtd->assigner_sd);
-						modifyFDInEpoll(wtd->worker_fd, EPOLLET | EPOLL_DESTROY,
-										wtd->worker_sd);
+			int sent = send(wtd->assigner_fd, iop, iop_size, 0);
 
-						break;
-					}
-				}
-			} else if (packet_type == ERROR) {
+			if (sent < iop_size) {
+				wtd->worker_buf_ptr += max(sent, 0);
+				memcpy(&wtd->worker_buf, iop, iop_size);
+
+				modifyFDInEpoll(wtd->assigner_fd, EPOLL_OUT | EPOLL_DESTROY,
+								wtd->assigner_sd);
+				modifyFDInEpoll(wtd->worker_fd, EPOLLET | EPOLL_DESTROY,
+								wtd->worker_sd);
+
 				break;
 			}
 		}
@@ -256,30 +259,31 @@ void handle_assigner_fd(struct socketDetails *sd) {
 		wtd->worker_buf_ptr = -1;
 
 		while (1) {
-			int packet_type = getPacketType(wtd->worker_fd, &wtd->worker_buf,
-											&wtd->worker_buf_ptr);
+			int required = MAX_DATA_CAPACITY - wtd->worker_buf_ptr;
+			int recved = recv(wtd->worker_fd, &wtd->worker_buf, required, 0);
 
-			if (packet_type == IO_PACKET) {
-				int done = getPacketData(wtd->worker_fd, &wtd->worker_buf,
-										 &wtd->worker_buf_ptr, iop, iop_size);
+			if (recved != required) {
+				modifyFDInEpoll(wtd->assigner_fd, EPOLL_IN | EPOLL_DESTROY,
+								wtd->assigner_sd);
+				modifyFDInEpoll(wtd->worker_fd, EPOLL_IN | EPOLL_DESTROY,
+								wtd->worker_sd);
+				break;
+			}
 
-				if (done == YES) {
-					int sent = send(wtd->assigner_fd, iop, iop_size, 0);
+			iop->packet_ID = PACKET_ID;
+			iop->packet_type = IO_PACKET;
+			iop->node_type = WORKER_NODE;
+			iop->UID = UID;
+			iop->task_ID = wtd->taskID;
+			memcpy(&iop->data, &wtd->worker_buf, 0);
 
-					if (sent < iop_size) {
-						wtd->worker_buf_ptr += max(sent, 0);
-						memcpy(&wtd->worker_buf, iop, iop_size);
+			wtd->worker_buf_ptr = 0;
 
-						modifyFDInEpoll(wtd->assigner_fd,
-										EPOLL_OUT | EPOLL_DESTROY,
-										wtd->assigner_sd);
-						modifyFDInEpoll(wtd->worker_fd, EPOLLET | EPOLL_DESTROY,
-										wtd->worker_sd);
+			int sent = send(wtd->assigner_fd, iop, iop_size, 0);
 
-						break;
-					}
-				}
-			} else if (packet_type == ERROR) {
+			if (sent < iop_size) {
+				wtd->worker_buf_ptr += max(sent, 0);
+				memcpy(&wtd->worker_buf, iop, iop_size);
 				break;
 			}
 		}
