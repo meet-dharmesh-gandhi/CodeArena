@@ -54,8 +54,11 @@ enum NodeTypes {
 #define MONITOR_CAPACITY 5
 #define ASSIGNER_CAPACITY 5
 #define WORKER_CAPACITY 5
+#define GATEWAY_CAPACITY 20
 #define STREAM_WAITING_QUEUE 10
 #define ARENA_SIZE 2048
+
+#define GATEWAY_VIP "10.20.14.108"
 
 #define MAX_FILE_SIZE 100000 // in bytes
 #define MAX_FILES 30

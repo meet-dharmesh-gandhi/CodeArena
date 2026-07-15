@@ -13,6 +13,11 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <net/if_arp.h>
+#include <netinet/ether.h>
+#include <netpacket/packet.h>
 #include <sched.h>
 #include <stdio.h>
 #include <string.h>
