@@ -111,7 +111,6 @@ void handle_container(struct socketDetails *sd) {
 										 &wtd->assigner_buf_ptr, iop, iop_size);
 
 				if (done == YES) {
-					// TODO process the packet
 					int sent = send(wtd->worker_fd, iop, iop_size, 0);
 
 					if (sent < iop_size) {
@@ -166,10 +165,9 @@ void handle_container(struct socketDetails *sd) {
 					createContainer(wtd);
 				}
 			} else if (packet_type == ERROR) {
-				modifyFDInEpoll(wtd->assigner_fd, EPOLL_IN | EPOLL_DESTROY,
+				modifyFDInEpoll(wtd->assigner_fd,
+								EPOLL_IN | EPOLLOUT | EPOLL_DESTROY,
 								wtd->assigner_sd);
-				modifyFDInEpoll(wtd->worker_fd, EPOLL_IN | EPOLL_DESTROY,
-								wtd->worker_sd);
 
 				break;
 			}
@@ -203,9 +201,7 @@ void handle_container(struct socketDetails *sd) {
 				wtd->worker_buf_ptr += max(sent, 0);
 				memcpy(&wtd->worker_buf, iop, iop_size);
 
-				modifyFDInEpoll(wtd->assigner_fd, EPOLL_OUT | EPOLL_DESTROY,
-								wtd->assigner_sd);
-				modifyFDInEpoll(wtd->worker_fd, EPOLLET | EPOLL_DESTROY,
+				modifyFDInEpoll(wtd->worker_fd, EPOLL_OUT | EPOLL_DESTROY,
 								wtd->worker_sd);
 
 				break;
@@ -262,10 +258,11 @@ void handle_assigner_fd(struct socketDetails *sd) {
 			int required = MAX_DATA_CAPACITY - wtd->worker_buf_ptr;
 			int recved = recv(wtd->worker_fd, &wtd->worker_buf, required, 0);
 
-			if (recved != required) {
-				modifyFDInEpoll(wtd->assigner_fd, EPOLL_IN | EPOLL_DESTROY,
-								wtd->assigner_sd);
-				modifyFDInEpoll(wtd->worker_fd, EPOLL_IN | EPOLL_DESTROY,
+			// TODO the worker will not always send MAX_DATA_CAPACITY, it may
+			// send less because it is a shell
+			if (recved < required) {
+				modifyFDInEpoll(wtd->worker_fd,
+								EPOLL_IN | EPOLLOUT | EPOLL_DESTROY,
 								wtd->worker_sd);
 				break;
 			}
@@ -287,7 +284,7 @@ void handle_assigner_fd(struct socketDetails *sd) {
 				break;
 			}
 		}
-	} else if (sd->events & (EPOLLERR | EPOLLRDHUP | EPOLLHUP)) {
+	} else if (sd->events & EPOLL_DESTROY) {
 		// assigner lost contact...
 		// wait for buddy to send a connection
 		markTasks(sd->fd);
@@ -309,11 +306,8 @@ void handle_assigner_fd(struct socketDetails *sd) {
 						wtd->assigner_buf_ptr = max(sent, 0);
 						memcpy(&wtd->assigner_buf, iop, iop_size);
 
-						modifyFDInEpoll(wtd->worker_fd,
-										EPOLL_OUT | EPOLL_DESTROY,
-										wtd->worker_sd);
 						modifyFDInEpoll(wtd->assigner_fd,
-										EPOLL_DESTROY | EPOLLET,
+										EPOLL_DESTROY | EPOLL_OUT,
 										wtd->assigner_sd);
 
 						break;

@@ -253,7 +253,8 @@ void handle_accept_worker_fd(struct socketDetails *sd) {
 						ts->worker_fd = res;
 						newSd->data = ts;
 						newSd->handler = expectedConnectionsList[i].handler;
-						addFDToEpoll(res, EPOLL_IN | EPOLL_DESTROY, newSd);
+						addFDToEpoll(res, EPOLL_IN | EPOLLOUT | EPOLL_DESTROY,
+									 newSd);
 						modifyTaskSd(newSd, addr);
 						expectedConnectionsList[i].filled = 0;
 						break;
@@ -438,11 +439,9 @@ void handle_gateway_fd(struct socketDetails *sd) {
 							}
 						} else if (packet_type == ERROR ||
 								   packet_type == UNKNOWN) {
-							// add EPOLLIN to both sockets
-							modifyFDInEpoll(sd->fd, EPOLL_IN | EPOLL_DESTROY,
-											sd);
+							// add EPOLLIN to worker socket
 							modifyFDInEpoll(ts->worker_fd,
-											EPOLL_IN | EPOLL_DESTROY,
+											EPOLL_IN | EPOLLOUT | EPOLL_DESTROY,
 											taskList[i].sd);
 
 							// also set buf_ptr to -1
@@ -451,12 +450,9 @@ void handle_gateway_fd(struct socketDetails *sd) {
 						}
 					}
 				} else {
-					// this should not happen generally, but in case there are
-					// bugs :(
-					// add EPOLLIN to both sockets
-					modifyFDInEpoll(sd->fd, EPOLL_IN | EPOLL_DESTROY, sd);
-					modifyFDInEpoll(ts->worker_fd, EPOLL_IN | EPOLL_DESTROY,
-									taskList[i].sd);
+					// the socket might be just created
+					modifyFDInEpoll(sd->fd, EPOLL_IN | EPOLLOUT | EPOLL_DESTROY,
+									sd);
 				}
 			}
 		}
@@ -494,14 +490,8 @@ void handle_gateway_fd(struct socketDetails *sd) {
 							ts->g_buf_ptr = max(sent, 0);
 
 							// remove EPOLLIN from this socket
-							modifyFDInEpoll(sd->fd, EPOLLET | EPOLL_DESTROY,
+							modifyFDInEpoll(sd->fd, EPOLL_OUT | EPOLL_DESTROY,
 											sd);
-
-							// add EPOLLOUT to worker socket
-							modifyFDInEpoll(taskList[ind].fd,
-											EPOLL_OUT | EPOLL_DESTROY,
-											taskList[ind].sd);
-
 							break;
 						}
 					}
@@ -604,9 +594,9 @@ void handle_worker_fd(struct socketDetails *sd) {
 						processTaskPacket();
 					}
 				} else if (packet_type == ERROR || packet_type == UNKNOWN) {
-					// add EPOLLIN to both sockets
-					modifyFDInEpoll(sd->fd, EPOLL_IN | EPOLL_DESTROY, sd);
-					modifyFDInEpoll(gateway_fd, EPOLL_IN | EPOLL_DESTROY,
+					// add EPOLLIN to the gateway socket
+					modifyFDInEpoll(gateway_fd,
+									EPOLL_IN | EPOLLOUT | EPOLL_DESTROY,
 									gateway_sd);
 
 					// set g_buf_ptr to -1
@@ -618,10 +608,9 @@ void handle_worker_fd(struct socketDetails *sd) {
 			// this should not happen generally, but in case there are
 			// bugs :(
 			// add EPOLLIN to both sockets
-			modifyFDInEpoll(sd->fd, EPOLL_IN | EPOLL_DESTROY, sd);
-			modifyFDInEpoll(gateway_fd, EPOLL_IN | EPOLL_DESTROY, gateway_sd);
+			modifyFDInEpoll(sd->fd, EPOLL_IN | EPOLLOUT | EPOLL_DESTROY, sd);
 		}
-	} else if (events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
+	} else if (events & EPOLL_DESTROY) {
 		// connection dropped
 		// TODO handle this connection drop
 	} else if (events & EPOLLIN) {
@@ -648,11 +637,7 @@ void handle_worker_fd(struct socketDetails *sd) {
 						ts->buf_ptr = max(sent, 0);
 
 						// remove EPOLLIN from this socket
-						modifyFDInEpoll(sd->fd, EPOLLET | EPOLL_DESTROY, sd);
-
-						// add EPOLLOUT to gateway socket
-						modifyFDInEpoll(gateway_fd, EPOLL_OUT | EPOLL_DESTROY,
-										gateway_sd);
+						modifyFDInEpoll(sd->fd, EPOLL_OUT | EPOLL_DESTROY, sd);
 
 						break;
 					}
@@ -1495,8 +1480,7 @@ int requestTCPConnection(int fd, struct sockaddr_in *given_addr, void *data) {
 
 	if (res == 0) {
 		// connected instantly
-		if (addFDToEpoll(fd, EPOLLIN | EPOLLHUP | EPOLLRDHUP | EPOLLET, data) <
-			0) {
+		if (addFDToEpoll(fd, EPOLL_IN | EPOLLOUT | EPOLL_DESTROY, data) < 0) {
 			// epoll add failed
 			close(fd);
 			return EXIT_FAILURE;
