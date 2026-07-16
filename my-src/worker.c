@@ -43,6 +43,9 @@ const int iop_size = sizeof(struct io_packet);
 struct task_over_packet *taop;
 const int taop_size = sizeof(struct task_over_packet);
 
+struct socketDetails *task_fd_sd, *hb_fd_sd, *assigner_fd_sd, *role_fd_sd,
+	*timer_fd_sd;
+
 extern void run_container(void *arg);
 
 int main(int argc, char const *argv[]) {
@@ -83,6 +86,39 @@ int main(int argc, char const *argv[]) {
 	pp = amalloc(&arena, pp_size);
 	fmp = amalloc(&arena, fmp_size);
 	hb = amalloc(&arena, hb_size);
+
+	task_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
+	task_fd_sd->fd = task_fd;
+	task_fd_sd->handler = handle_task_fd;
+	task_fd_sd->events = 0;
+	task_fd_sd->data = NULL;
+
+	hb_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
+	hb_fd_sd->fd = hb_fd;
+	hb_fd_sd->handler = handle_hb_fd;
+	hb_fd_sd->events = 0;
+	hb_fd_sd->data = NULL;
+
+	assigner_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
+	assigner_fd_sd->fd = assigner_fd;
+	assigner_fd_sd->handler = handle_assigner_fd;
+	assigner_fd_sd->events = 0;
+	assigner_fd_sd->data = NULL;
+
+	role_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
+	role_fd_sd->fd = role_fd;
+	role_fd_sd->handler = handle_role_fd;
+	role_fd_sd->events = 0;
+	role_fd_sd->data = NULL;
+
+	timer_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
+	timer_fd_sd->fd = timer_fd;
+	timer_fd_sd->handler = handle_timer_fd;
+	timer_fd_sd->events = 0;
+	timer_fd_sd->data = NULL;
+
+	startLoop(MAX_EVENTS, 5, task_fd_sd, hb_fd_sd, assigner_fd_sd, role_fd_sd,
+			  timer_fd_sd);
 
 	return 0;
 }
@@ -299,7 +335,6 @@ void handle_assigner_fd(struct socketDetails *sd) {
 										 &wtd->assigner_buf_ptr, iop, iop_size);
 
 				if (done == YES) {
-					// TODO process the packet
 					int sent = send(wtd->worker_fd, iop, iop_size, 0);
 
 					if (sent < iop_size) {

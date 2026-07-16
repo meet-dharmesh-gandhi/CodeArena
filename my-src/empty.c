@@ -29,7 +29,7 @@ const int hp_size = sizeof(struct heartbeat_packet);
 struct find_monitor_packet *fmp;
 const int fmp_size = sizeof(struct find_monitor_packet);
 
-struct socketDetails *role_timer_fd_sd;
+struct socketDetails *role_timer_fd_sd, *role_fd_sd, *hb_fd_sd, *timer_fd_sd;
 int role_timer_on;
 
 // TODO ADD LOGS, MEMORY MANAGEMENT IN EVERY NODE!!
@@ -63,17 +63,38 @@ int main(int argc, char const *argv[]) {
 	int jitter = getJitter(1000, 50);
 	role_timer_fd = getNewTimerFD(CLOCK_MONOTONIC, jitter, jitter, 1);
 
+	gp = amalloc(&arena, gp_size);
+	pp = amalloc(&arena, pp_size);
+	dp = amalloc(&arena, dp_size);
+	hp = amalloc(&arena, hp_size);
+	fmp = amalloc(&arena, fmp_size);
+
 	role_timer_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
 	role_timer_fd_sd->fd = role_timer_fd;
 	role_timer_fd_sd->handler = handle_role_timer_fd;
 	role_timer_fd_sd->data = NULL;
 	role_timer_on = 0;
 
-	gp = amalloc(&arena, gp_size);
-	pp = amalloc(&arena, pp_size);
-	dp = amalloc(&arena, dp_size);
-	hp = amalloc(&arena, hp_size);
-	fmp = amalloc(&arena, fmp_size);
+	role_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
+	role_fd_sd->fd = role_fd;
+	role_fd_sd->handler = handle_role_fd;
+	role_fd_sd->data = NULL;
+	role_fd_sd->events = 0;
+
+	hb_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
+	hb_fd_sd->fd = hb_fd;
+	hb_fd_sd->handler = handle_hb_fd;
+	hb_fd_sd->data = NULL;
+	hb_fd_sd->events = 0;
+
+	timer_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
+	timer_fd_sd->fd = timer_fd;
+	timer_fd_sd->handler = handle_timer_fd;
+	timer_fd_sd->data = NULL;
+	timer_fd_sd->events = 0;
+
+	startLoop(MAX_EVENTS, 4, role_timer_fd_sd, role_fd_sd, hb_fd_sd,
+			  timer_fd_sd);
 
 	return 0;
 }
@@ -153,9 +174,12 @@ void sendHeartbeat() {
 	}
 
 	if (memcmp(monitorAddr, emptyAddr, addrLen) == 0) {
-		// add role_timer_fd to epoll
-		addFDToEpoll(role_timer_fd, EPOLLET | EPOLLONESHOT, role_timer_fd_sd);
-		role_timer_on = 1;
+		if (role_timer_on == 0) {
+			// add role_timer_fd to epoll
+			addFDToEpoll(role_timer_fd, EPOLLET | EPOLLONESHOT,
+						 role_timer_fd_sd);
+			role_timer_on = 1;
+		}
 		return;
 	}
 

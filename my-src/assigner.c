@@ -36,7 +36,9 @@ int *buddyBufferPtr;
 int task_fd, find_fd, hb_fd, role_fd, discover_fd, gateway_fd, buddy_fd,
 	timer_fd, accept_buddy_fd, accept_worker_fd;
 
-struct socketDetails *gateway_sd;
+struct socketDetails *task_fd_sd, *find_fd_sd, *hb_fd_sd, *role_fd_sd,
+	*gateway_fd_sd, *buddy_fd_sd, *timer_fd_sd, *accept_buddy_fd_sd,
+	*accept_worker_fd_sd;
 
 uint8_t *fd_buf;
 const int fdBufSize = sizeof(uint8_t) * LARGEST_PACKET;
@@ -140,11 +142,63 @@ int main(int argc, char const *argv[]) {
 	fmp = amalloc(&arena, fmp_size);
 	bhp = amalloc(&arena, bhp_size);
 
-	gateway_sd = amalloc(&arena, sizeof(struct socketDetails));
-	gateway_sd->fd = gateway_fd;
-	gateway_sd->handler = handle_gateway_fd;
-	gateway_sd->data = NULL;
-	gateway_sd->events = 0;
+	task_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
+	task_fd_sd->fd = task_fd;
+	task_fd_sd->handler = handle_task_fd;
+	task_fd_sd->data = NULL;
+	task_fd_sd->events = 0;
+
+	find_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
+	find_fd_sd->fd = find_fd;
+	find_fd_sd->handler = handle_find_fd;
+	find_fd_sd->data = NULL;
+	find_fd_sd->events = 0;
+
+	hb_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
+	hb_fd_sd->fd = hb_fd;
+	hb_fd_sd->handler = handle_hb_fd;
+	hb_fd_sd->data = NULL;
+	hb_fd_sd->events = 0;
+
+	role_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
+	role_fd_sd->fd = role_fd;
+	role_fd_sd->handler = handle_role_fd;
+	role_fd_sd->data = NULL;
+	role_fd_sd->events = 0;
+
+	gateway_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
+	gateway_fd_sd->fd = gateway_fd;
+	gateway_fd_sd->handler = handle_gateway_fd;
+	gateway_fd_sd->data = NULL;
+	gateway_fd_sd->events = 0;
+
+	buddy_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
+	buddy_fd_sd->fd = buddy_fd;
+	buddy_fd_sd->handler = handle_buddy_fd;
+	buddy_fd_sd->data = NULL;
+	buddy_fd_sd->events = 0;
+
+	accept_buddy_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
+	accept_buddy_fd_sd->fd = accept_buddy_fd;
+	accept_buddy_fd_sd->handler = handle_accept_buddy_fd;
+	accept_buddy_fd_sd->data = NULL;
+	accept_buddy_fd_sd->events = 0;
+
+	accept_worker_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
+	accept_worker_fd_sd->fd = accept_worker_fd;
+	accept_worker_fd_sd->handler = handle_accept_worker_fd;
+	accept_worker_fd_sd->data = NULL;
+	accept_worker_fd_sd->events = 0;
+
+	timer_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
+	timer_fd_sd->fd = timer_fd;
+	timer_fd_sd->handler = handle_timer_fd;
+	timer_fd_sd->data = NULL;
+	timer_fd_sd->events = 0;
+
+	startLoop(MAX_EVENTS, 9, task_fd_sd, find_fd_sd, hb_fd_sd, role_fd_sd,
+			  gateway_fd_sd, buddy_fd_sd, accept_buddy_fd_sd,
+			  accept_worker_fd_sd, timer_fd_sd);
 
 	return 0;
 }
@@ -597,7 +651,7 @@ void handle_worker_fd(struct socketDetails *sd) {
 					// add EPOLLIN to the gateway socket
 					modifyFDInEpoll(gateway_fd,
 									EPOLL_IN | EPOLLOUT | EPOLL_DESTROY,
-									gateway_sd);
+									gateway_fd_sd);
 
 					// set g_buf_ptr to -1
 					ts->g_buf_ptr = -1;

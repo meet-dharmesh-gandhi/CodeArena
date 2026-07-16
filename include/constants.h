@@ -57,6 +57,8 @@ enum NodeTypes {
 #define GATEWAY_CAPACITY 20
 #define STREAM_WAITING_QUEUE 10
 #define ARENA_SIZE 2048
+#define MAX_EVENTS                                                             \
+	6 // accounts for EPOLLIN, EPOLLOUT, EPOLLRDHUP, EPOLLHUP, EPOLLET, EPOLLERR
 
 #define GATEWAY_VIP "10.20.14.108"
 

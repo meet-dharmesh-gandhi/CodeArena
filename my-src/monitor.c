@@ -37,6 +37,8 @@ const int dp_size = sizeof(struct demotion_packet);
 struct promotion_packet *pp;
 const int pp_size = sizeof(struct promotion_packet);
 
+struct socketDetails *find_fd_sd, *hb_fd_sd, *role_fd_sd, *timer_fd_sd;
+
 int main(int argc, char const *argv[]) {
 	UID = UID = randInt(-1, MAX_UID);
 
@@ -72,6 +74,32 @@ int main(int argc, char const *argv[]) {
 	mhb = amalloc(&arena, mhb_size);
 	dp = amalloc(&arena, dp_size);
 	pp = amalloc(&arena, pp_size);
+
+	find_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
+	find_fd_sd->fd = find_fd;
+	find_fd_sd->handler = handle_find_fd;
+	find_fd_sd->data = NULL;
+	find_fd_sd->events = 0;
+
+	hb_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
+	hb_fd_sd->fd = hb_fd;
+	hb_fd_sd->handler = handle_hb_fd;
+	hb_fd_sd->data = NULL;
+	hb_fd_sd->events = 0;
+
+	role_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
+	role_fd_sd->fd = role_fd;
+	role_fd_sd->handler = handle_role_fd;
+	role_fd_sd->data = NULL;
+	role_fd_sd->events = 0;
+
+	timer_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
+	timer_fd_sd->fd = timer_fd;
+	timer_fd_sd->handler = handle_timer_fd;
+	timer_fd_sd->data = NULL;
+	timer_fd_sd->events = 0;
+
+	startLoop(MAX_EVENTS, 4, find_fd_sd, hb_fd_sd, role_fd_sd, timer_fd_sd);
 
 	return 0;
 }
