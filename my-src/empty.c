@@ -32,7 +32,6 @@ const int fmp_size = sizeof(struct find_monitor_packet);
 struct socketDetails *role_timer_fd_sd, *role_fd_sd, *hb_fd_sd, *timer_fd_sd;
 int role_timer_on;
 
-// TODO ADD LOGS, MEMORY MANAGEMENT IN EVERY NODE!!
 int main(int argc, char const *argv[]) {
 	UID = randInt(-1, MAX_UID);
 
@@ -93,14 +92,22 @@ int main(int argc, char const *argv[]) {
 	timer_fd_sd->data = NULL;
 	timer_fd_sd->events = 0;
 
+	printc(INFO, "empty", "Event loop started\n");
+
 	startLoop(MAX_EVENTS, 4, role_timer_fd_sd, role_fd_sd, hb_fd_sd,
 			  timer_fd_sd);
+
+	printc(INFO, "empty", "Event loop ended\n");
+
+	freeArena(&arena);
 
 	return 0;
 }
 
 void handle_role_timer_fd(struct socketDetails *sd) {
 	readTimerFD(role_timer_fd);
+
+	printc(INFO, "empty - handle_role_timer_fd", "Becoming monitor\n");
 
 	// now become a monitor
 	morph(MONITOR_NODE);
@@ -123,9 +130,13 @@ void handle_hb_fd(struct socketDetails *sd) {
 
 			if (packet_type == MONITOR_HEARTBEAT_PACKET) {
 				if (memcmp(monitorAddr, emptyAddr, addrLen) == 0) {
+					printc(INFO, "empty - handle_hb_fd", "New monitor: %s\n",
+						   getPrintableIP(addr));
 					memcpy(monitorAddr, addr, addrLen);
 					*monitorLastShouted = getCurrTime();
 				} else if (memcmp(monitorAddr, addr, addrLen) == 0) {
+					printc(INFO, "empty - handle_hb_fd",
+						   "Existing monitor: %s\n", getPrintableIP(addr));
 					*monitorLastShouted = getCurrTime();
 				}
 			}
@@ -148,11 +159,15 @@ void handle_role_fd(struct socketDetails *sd) {
 				memcpy(pp, fd_buf, pp_size);
 
 				if (pp->target_node_type == ASSIGNER_NODE) {
+					printc(INFO, "empty - handle_role_fd",
+						   "Becoming assigner\n");
 					morph(ASSIGNER_NODE);
 				} else if (pp->target_node_type == WORKER_NODE) {
+					printc(INFO, "empty - handle_role_fd", "Becoming worker\n");
 					morph(WORKER_NODE);
 				}
 			} else if (packet_type == DEMOTE_PACKET) {
+				printc(INFO, "empty - handle_role_fd", "Demote to what?\n");
 				// currently impossible to happen
 			}
 		} else if (res != 2) {
@@ -176,14 +191,18 @@ void sendHeartbeat() {
 	if (memcmp(monitorAddr, emptyAddr, addrLen) == 0) {
 		if (role_timer_on == 0) {
 			// add role_timer_fd to epoll
+			printc(INFO, "empty - sendHeartbeat", "Started role timer\n");
 			addFDToEpoll(role_timer_fd, EPOLLET | EPOLLONESHOT,
 						 role_timer_fd_sd);
 			role_timer_on = 1;
 		}
+		printc(INFO, "empty - sendHeartbeat", "Sending discovery packet\n");
+		sendDiscoveryPacket();
 		return;
 	}
 
 	if (role_timer_on == 1) {
+		printc(INFO, "empty - sendHeartbeat", "Ended role timer\n");
 		deleteFDInEpoll(role_timer_fd);
 		role_timer_on = 0;
 	}
@@ -194,6 +213,13 @@ void sendHeartbeat() {
 	hp->UID = UID;
 
 	sendto(hb_fd, hp, hp_size, 0, monitorAddr, addrLen);
+}
+
+void sendDiscoveryPacket() {
+	fmp->packet_ID = PACKET_ID;
+	fmp->packet_type = FIND_MONITOR_PACKET;
+
+	sendto(discover_fd, fmp, fmp_size, 0, broadcastAddr, addrLen);
 }
 
 /**

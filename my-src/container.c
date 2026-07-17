@@ -35,6 +35,7 @@ char *filename;
 
 // TODO add limits to the container
 void run_container(void *arg) {
+	printc(INFO, "container - run_container", "Container started\n");
 	int container_fd = *(int *)arg;
 	buf = malloc(MAX_FILE_SIZE);
 	filename = malloc(MAX_FILENAME_SIZE);
@@ -47,6 +48,7 @@ void run_container(void *arg) {
 	}
 
 	// got the number of incoming files!
+	printc(INFO, "container - run_container", "Number of files: %d\n", n_files);
 	memcpy(&n_files, buf, required);
 
 	if (n_files > MAX_FILES) {
@@ -57,6 +59,8 @@ void run_container(void *arg) {
 	for (int i = 0; i < n_files; i++) {
 		createFile(container_fd);
 	}
+
+	printc(INFO, "container - run_container", "Files created\n");
 
 	// all files created, now connect the input and output to the socket
 	connectFD(container_fd, STDIN_FILENO);
@@ -75,6 +79,7 @@ void connectFD(int source_fd, int target_fd) {
 }
 
 int createFile(int container_fd) {
+	printc(INFO, "container - createFile", "Creating File\n");
 	uint8_t filename_size = 0;
 	uint32_t file_size = 0;
 
@@ -86,6 +91,8 @@ int createFile(int container_fd) {
 	recved = recvFull(container_fd, buf, required, 0);
 
 	if (recved == EXIT_FAILURE) {
+		printc(ERR, "container - createFile", "Could not get filename size\n");
+		perror("recv");
 		exit(1);
 	}
 
@@ -97,6 +104,8 @@ int createFile(int container_fd) {
 	recved = recvFull(container_fd, buf, required, 0);
 
 	if (recved == EXIT_FAILURE) {
+		printc(ERR, "container - createFile", "Could not get filename\n");
+		perror("recv");
 		exit(1);
 	}
 
@@ -109,13 +118,19 @@ int createFile(int container_fd) {
 	recved = recvFull(container_fd, buf, required, 0);
 
 	if (recved == EXIT_FAILURE) {
+		printc(ERR, "container - createFile", "Could not get file size\n");
+		perror("recv");
 		exit(1);
 	}
+
+	printc(INFO, "container - createFile", "Filename: %s\n", filename);
 
 	// got the file size
 	memcpy(file_size, buf, required);
 
 	if (file_size > MAX_FILE_SIZE) {
+		printc(ERR, "container - createFile", "file too huge, file size: %d\n",
+			   file_size);
 		exit(1);
 	}
 
@@ -124,6 +139,8 @@ int createFile(int container_fd) {
 	recved = recvFull(container_fd, buf, required, 0);
 
 	if (recved == EXIT_FAILURE) {
+		printc(ERR, "container - createFile", "Could not get file\n");
+		perror("recv");
 		exit(1);
 	}
 
@@ -132,10 +149,14 @@ int createFile(int container_fd) {
 	FILE *f = fopen(filename, "w");
 
 	if (f == NULL) {
+		printc(ERR, "container - createFile", "Could not create file\n");
+		perror("file");
 		exit(1);
 	}
 
 	fwrite(buf, 1, required, f);
 
 	fclose(f);
+
+	printc(INFO, "container - createFile", "Created File\n");
 }

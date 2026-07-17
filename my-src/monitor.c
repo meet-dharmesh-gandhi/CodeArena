@@ -99,7 +99,13 @@ int main(int argc, char const *argv[]) {
 	timer_fd_sd->data = NULL;
 	timer_fd_sd->events = 0;
 
+	printc(INFO, "monitor", "Event loop starting\n");
+
 	startLoop(MAX_EVENTS, 4, find_fd_sd, hb_fd_sd, role_fd_sd, timer_fd_sd);
+
+	printc(INFO, "monitor", "Event loop ending\n");
+
+	freeArena(&arena);
 
 	return 0;
 }
@@ -128,6 +134,7 @@ void handle_role_fd(struct socketDetails *sd) {
 			if (packet_type == PROMOTE_PACKET) {
 				// should not happen
 			} else if (packet_type == DEMOTE_PACKET) {
+				printc(IMP, "monitor - handle_role_fd", "Demoting\n");
 				morph(EMPTY_NODE);
 			}
 		} else if (res != 2) {
@@ -170,6 +177,8 @@ void handle_find_fd(struct socketDetails *sd) {
 				memcpy(fnp, fd_buf, fnp_size);
 
 				if (fnp->node_type == GATEWAY_NODE) {
+					printc(INFO, "monitor - handle_find_fd",
+						   "Gateway wants an assigner\n");
 					// wants an assigner
 					int localMinLoadedAssigner = getLocalMinLoadedAssigner();
 
@@ -194,6 +203,8 @@ void handle_find_fd(struct socketDetails *sd) {
 					sendFoundNodePacket(0, emptyAddr, addr);
 				} else if (fnp->node_type == ASSIGNER_NODE &&
 						   fnp->target_node_type == ASSIGNER_NODE) {
+					printc(INFO, "monitor - handle_find_fd",
+						   "Assigner wants buddy: %s\n", getPrintableIP(addr));
 					// find an assigner with no buddy
 					int buddyInd = findBuddy();
 
@@ -206,6 +217,8 @@ void handle_find_fd(struct socketDetails *sd) {
 					// assigner
 				} else if (fnp->node_type == ASSIGNER_NODE &&
 						   fnp->target_node_type == WORKER_NODE) {
+					printc(INFO, "monitor - handle_find_fd",
+						   "Assigner wants worker: %s\n", getPrintableIP(addr));
 					// find a worker with the least capacity
 					int localMinLoadedWorker = getLocalMinLoadedWorker();
 
@@ -245,6 +258,8 @@ void cleanUpNodes() {
 	for (int i = 0; i < nodeListLength; i++) {
 		if (nodeList[i].filled == 1 &&
 			getCurrTime() - nodeList[i].lastShouted > EXPIRE_PERIOD) {
+			printc(INFO, "monitor - cleanUpNodes", "Node expired: %s\n",
+				   getPrintableIP(&nodeList[i].addr));
 			nodeList[i].filled = 0;
 		}
 	}
@@ -252,6 +267,8 @@ void cleanUpNodes() {
 	for (int i = 0; i < monitorListLength; i++) {
 		if (monitorList[i].filled == 1 &&
 			getCurrTime() - monitorList[i].lastShouted > EXPIRE_PERIOD) {
+			printc(INFO, "monitor - cleanUpNodes", "Monitor expired: %s\n",
+				   getPrintableIP(&monitorList[i].addr));
 			monitorList[i].filled = 0;
 		}
 	}
@@ -267,10 +284,13 @@ void sendRolePackets() {
 		return;
 	}
 
+	printc(INFO, "monitor - sendRolePackets", "Sending role packets\n");
+
 	int assigners = getTotalNodes(ASSIGNER_NODE);
 	int workers = getTotalNodes(ASSIGNER_NODE);
 	int emptyNodes = getTotalNodes(EMPTY_NODE);
 	int monitors = getTotalNodes(MONITOR_NODE);
+	int gateways = getGlobalNodes(GATEWAY_NODE);
 	int tasks = getGatewayLoad();
 
 	// for promotion
@@ -284,11 +304,21 @@ void sendRolePackets() {
 		divideCeil(tasks, DEMOTE_ASSIGNER_THRESHOLD);
 	int demotionExpectedWorkers = divideCeil(tasks, DEMOTE_WORKER_THRESHOLD);
 
+	printc(INFO, "monitor - sendRolePackets",
+		   "assigners: %d, workers: %d, empty: %d, monitors: %d, gateways: %d, "
+		   "tasks: %d, promotionExpectedAssigners: %d, "
+		   "promotionExpectedWorkers: %d, demotionExpectedMonitors: %d, "
+		   "demotionExpectedAssigners: %d, demotionExpectedWorkers: %d\n",
+		   assigners, workers, emptyNodes, monitors, gateways, tasks,
+		   promotionExpectedAssigners, promotionExpectedWorkers,
+		   demotionExpectedMonitors, demotionExpectedAssigners,
+		   demotionExpectedWorkers);
+
 	// check for promotions first
 
 	// check if there is a gateway
-	int gateways = getGlobalNodes(GATEWAY_NODE);
 	if (gateways < 1) {
+		printc(IMP, "monitor - sendRolePackets", "Becoming gateway\n");
 		// no gateway, become the gateway
 		morph(GATEWAY_NODE);
 	}
@@ -297,9 +327,12 @@ void sendRolePackets() {
 		// need to promote empty nodes or worker nodes
 		if (promotionExpectedWorkers < workers) {
 			// workers are extra, promote one of them
+			printc(IMP, "monitor - sendRolePackets", "Promoting a worker\n");
 			sendPromotePacket(WORKER_NODE, ASSIGNER_NODE);
+			workers--;
 		} else if (emptyNodes > 0) {
 			// promote an empty node
+			printc(IMP, "monitor - sendRolePackets", "Promoting an empty\n");
 			sendPromotePacket(EMPTY_NODE, ASSIGNER_NODE);
 			emptyNodes--;
 		}
@@ -308,6 +341,7 @@ void sendRolePackets() {
 	if (promotionExpectedWorkers > workers) {
 		// need to promote empty nodes
 		if (emptyNodes > 0) {
+			printc(IMP, "monitor - sendRolePackets", "Promoting an empty\n");
 			sendPromotePacket(EMPTY_NODE, WORKER_NODE);
 			emptyNodes--;
 		}
@@ -317,24 +351,32 @@ void sendRolePackets() {
 
 	// check for gateways first
 	if (gateways > 1) {
+		printc(IMP, "monitor - sendRolePackets", "Demoting gateways: %d\n",
+			   gateways - 1);
 		sendDemotePackets(GATEWAY_NODE, gateways - 1);
 	}
 
 	// then check for monitors
 	if (demotionExpectedMonitors < monitors) {
 		// too many monitors
+		printc(IMP, "monitor - sendRolePackets", "Demoting monitors: %d\n",
+			   monitors - demotionExpectedMonitors);
 		sendDemotePackets(MONITOR_NODE, monitors - demotionExpectedMonitors);
 	}
 
 	// check for assigners
 	if (demotionExpectedAssigners < assigners) {
 		// too many assigners
+		printc(IMP, "monitor - sendRolePackets", "Demoting assigners: %d\n",
+			   assigners - demotionExpectedAssigners);
 		sendDemotePackets(ASSIGNER_NODE, assigners - demotionExpectedAssigners);
 	}
 
 	// finally check for workers
 	if (demotionExpectedWorkers < workers) {
 		// too many workers
+		printc(IMP, "monitor - sendRolePackets", "Demoting workers: %d\n",
+			   workers - demotionExpectedWorkers);
 		sendDemotePackets(WORKER_NODE, workers - demotionExpectedWorkers);
 	}
 }
@@ -515,6 +557,14 @@ void sendHeartbeat() {
 					  getTotalNodes(EMPTY_NODE);
 	mhb->gateway_load = getGatewayLoad();
 
+	printc(INFO, "monitor - sendHeartbeat",
+		   "Heartbeat - has_assigner_without_buddy: %d, min_load_assigner: %d, "
+		   "min_load_worker: %d, assigners: %d, workers: %d, gateways: %d, "
+		   "totalNodes: %d, gateway_load: %d\n",
+		   mhb->has_assigner_without_buddy, mhb->min_load_assigner,
+		   mhb->min_load_worker, mhb->assigners, mhb->workers, mhb->gateways,
+		   mhb->totalNodes, mhb->gateway_load);
+
 	// broadcast the heartbeat
 	sendto(hb_fd, mhb, mhb_size, 0, broadcastAddr, addrLen);
 }
@@ -555,6 +605,8 @@ void registerMonitorHeartbeat() {
 
 	if (nodeInd == NO && emptyNode != YES) {
 		// new monitor
+		printc(IMP, "assigner - registerMonitorHeartbeat", "New monitor: %s\n",
+			   getPrintableIP(addr));
 		monitorList[emptyNode].filled = 1;
 		monitorList[emptyNode].UID = mhb->UID;
 		memcpy(&monitorList[emptyNode].addr, addr, addrLen);
@@ -568,6 +620,8 @@ void registerMonitorHeartbeat() {
 		monitorList[emptyNode].lastShouted = getCurrTime();
 	} else if (nodeInd != NO) {
 		// existing monitor
+		printc(IMP, "assigner - registerMonitorHeartbeat",
+			   "Existing monitor: %s\n", getPrintableIP(addr));
 		monitorList[nodeInd].min_load_assigner = mhb->min_load_assigner;
 		monitorList[nodeInd].min_load_worker = mhb->min_load_worker;
 		monitorList[emptyNode].gateway_load = mhb->gateway_load;
@@ -624,6 +678,8 @@ void registerNodeHeartbeat() {
 
 	if (nodeInd == NO && emptyNode != YES) {
 		// new node
+		printc(IMP, "assigner - registerNodeHeartbeat", "New node: %s\n",
+			   getPrintableIP(addr));
 		nodeList[emptyNode].filled = 1;
 		nodeList[emptyNode].nodeType = hb->node_type;
 		nodeList[emptyNode].UID = hb->UID;
@@ -633,6 +689,8 @@ void registerNodeHeartbeat() {
 		memcpy(&nodeList[emptyNode].addr, addr, addrLen);
 	} else if (nodeInd != NO) {
 		// existing node
+		printc(IMP, "assigner - registerNodeHeartbeat", "Existing node: %s\n",
+			   getPrintableIP(addr));
 		nodeList[nodeInd].load = hb->load;
 		nodeList[nodeInd].hasBuddy = hb->has_buddy;
 		nodeList[nodeInd].lastShouted = getCurrTime();

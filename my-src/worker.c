@@ -117,8 +117,14 @@ int main(int argc, char const *argv[]) {
 	timer_fd_sd->events = 0;
 	timer_fd_sd->data = NULL;
 
+	printc(INFO, "worker", "Event loop started\n");
+
 	startLoop(MAX_EVENTS, 5, task_fd_sd, hb_fd_sd, assigner_fd_sd, role_fd_sd,
 			  timer_fd_sd);
+
+	printc(INFO, "worker", "Event loop ended\n");
+
+	freeArena(&arena);
 
 	return 0;
 }
@@ -126,6 +132,7 @@ int main(int argc, char const *argv[]) {
 void handle_container(struct socketDetails *sd) {
 	struct WorkerTaskDetail *wtd = (struct WorkerTaskDetail *)sd->data;
 	if (sd->events & EPOLLOUT) {
+		printc(INFO, "worker - handle_container", "EPOLLOUT\n");
 		// ready to receive output
 		int required = iop_size - wtd->assigner_buf_ptr;
 		int sent = send(wtd->worker_fd, &wtd->assigner_buf, required, 0);
@@ -201,6 +208,8 @@ void handle_container(struct socketDetails *sd) {
 					createContainer(wtd);
 				}
 			} else if (packet_type == ERROR) {
+				printc(INFO, "worker - handle_container",
+					   "EPOLLOUT - All packets over\n");
 				modifyFDInEpoll(wtd->assigner_fd,
 								EPOLL_IN | EPOLLOUT | EPOLL_DESTROY,
 								wtd->assigner_sd);
@@ -211,6 +220,7 @@ void handle_container(struct socketDetails *sd) {
 	} else if (sd->events & EPOLL_DESTROY) {
 		// container destroyed
 		// send a task over packet
+		printc(INFO, "worker - handle_container", "Connected ended\n");
 		sendTaskOverPacket(wtd);
 	} else if (sd->events & EPOLLIN) {
 		// incoming data, forward to assigner
@@ -221,6 +231,8 @@ void handle_container(struct socketDetails *sd) {
 			if (recved != required) {
 				break;
 			}
+
+			printc(INFO, "worker - handle_container", "EPOLLIN\n");
 
 			iop->packet_ID = PACKET_ID;
 			iop->packet_type = IO_PACKET;
@@ -266,8 +278,12 @@ void handle_role_fd(struct socketDetails *sd) {
 
 			if (packet_type == PROMOTE_PACKET &&
 				pp->target_node_type == ASSIGNER_NODE) {
+				printc(INFO, "worker - handle_role_fd",
+					   "Promoting to assigner\n");
 				morph(ASSIGNER_NODE);
 			} else if (packet_type == DEMOTE_PACKET) {
+				printc(INFO, "worker - handle_role_fd",
+					   "Demoting to empty node\n");
 				morph(EMPTY_NODE);
 			}
 		} else if (res != 2) {
@@ -279,6 +295,7 @@ void handle_role_fd(struct socketDetails *sd) {
 void handle_assigner_fd(struct socketDetails *sd) {
 	struct WorkerTaskDetail *wtd = (struct WorkerTaskDetail *)sd->data;
 	if (sd->events & EPOLLOUT) {
+		printc(INFO, "worker - handle_assigner_fd", "EPOLLOUT\n");
 		// ready to receive output
 		int required = iop_size - wtd->worker_buf_ptr;
 		int sent = send(wtd->assigner_fd, &wtd->worker_buf, required, 0);
@@ -323,6 +340,7 @@ void handle_assigner_fd(struct socketDetails *sd) {
 	} else if (sd->events & EPOLL_DESTROY) {
 		// assigner lost contact...
 		// wait for buddy to send a connection
+		printc(INFO, "worker - handle_assigner_fd", "Connection dropped\n");
 		markTasks(sd->fd);
 	} else if (sd->events & EPOLLIN) {
 		while (1) {
@@ -335,6 +353,8 @@ void handle_assigner_fd(struct socketDetails *sd) {
 										 &wtd->assigner_buf_ptr, iop, iop_size);
 
 				if (done == YES) {
+					printc(INFO, "worker - handle_assigner_fd",
+						   "IO Packet, task: %d\n", iop->task_ID);
 					int sent = send(wtd->worker_fd, iop, iop_size, 0);
 
 					if (sent < iop_size) {
@@ -355,6 +375,8 @@ void handle_assigner_fd(struct socketDetails *sd) {
 								  &wtd->assigner_buf_ptr, rtwp, rtwp_size);
 
 				if (done == YES) {
+					printc(INFO, "worker - handle_assigner_fd",
+						   "Resume task: %d\n", rtwp->taskID);
 					// add this task to the task list
 					int tdId = findTask(rtwp->taskID);
 					if (tdId == -1) {
@@ -374,6 +396,8 @@ void handle_assigner_fd(struct socketDetails *sd) {
 										 &wtd->assigner_buf_ptr, ctp, ctp_size);
 
 				if (done == YES) {
+					printc(INFO, "worker - handle_assigner_fd",
+						   "Cancel task: %d\n", ctp->taskID);
 					shutdown(sd->fd, SHUT_RDWR);
 					removeFromTaskList(ctp->taskID);
 				}
@@ -383,6 +407,8 @@ void handle_assigner_fd(struct socketDetails *sd) {
 										 &wtd->assigner_buf_ptr, tp, tp_size);
 
 				if (done == YES) {
+					printc(INFO, "worker - handle_assigner_fd", "Task: %d\n",
+						   tp->taskID);
 					struct WorkerTaskDetail *wtd =
 						addToTaskList(tp->taskID, sd->fd);
 
@@ -410,9 +436,13 @@ void handle_hb_fd(struct socketDetails *sd) {
 
 			if (packet_type == MONITOR_HEARTBEAT_PACKET) {
 				if (memcmp(monitorAddr, emptyAddr, addrLen) == 0) {
+					printc(INFO, "worker - handle_hb_fd", "New monitor: %s\n",
+						   getPrintableIP(addr));
 					memcpy(addr, monitorAddr, addrLen);
 					*monitor_last_shouted = getCurrTime();
 				} else if (memcmp(addr, monitorAddr, addrLen) == 0) {
+					printc(INFO, "worker - handle_hb_fd",
+						   "Existing monitor: %s\n", getPrintableIP(addr));
 					*monitor_last_shouted = getCurrTime();
 				}
 			}
@@ -431,6 +461,8 @@ void handle_task_fd(struct socketDetails *sd) {
 			int packet_type = validPacket();
 
 			if (packet_type == TASK_PACKET) {
+				printc(INFO, "worker - handle_task_fd", "New task: %d\n",
+					   tp->taskID);
 				// copy to tp
 				memcpy(tp, fd_buf, tp_size);
 
@@ -448,6 +480,8 @@ void handle_task_fd(struct socketDetails *sd) {
 				// create a new container
 				createContainer(wtd);
 			} else if (packet_type == RESUME_TASK_PACKET) {
+				printc(INFO, "worker - handle_task_fd", "Resume task: %d\n",
+					   rtwp->taskID);
 				// update the task
 				int tdId = findTask(rtwp->taskID);
 				if (tdId == -1) {
@@ -486,6 +520,8 @@ void sendTaskOverPacket(struct WorkerTaskDetail *wtd) {
 }
 
 int createContainer(struct WorkerTaskDetail *wtd) {
+	printc(INFO, "worker - createContainer",
+		   "Creating container for task: %d\n", wtd->taskID);
 	int uds[2];
 
 	uid_t uid = getuid();
@@ -494,6 +530,8 @@ int createContainer(struct WorkerTaskDetail *wtd) {
 	// create uds
 	if (socketpair(AF_UNIX, SOCK_STREAM, 0, uds) == -1) {
 		// uds was not created
+		printc(ERR, "worker - createContainer", "Could not create UDS\n");
+		perror("UDS");
 		return;
 	}
 
@@ -507,6 +545,9 @@ int createContainer(struct WorkerTaskDetail *wtd) {
 
 	if (container_pid == -1) {
 		// the container was not created
+		printc(ERR, "worker - createContainer",
+			   "Could not create the container\n");
+		perror("clone");
 		return;
 	}
 
@@ -525,6 +566,8 @@ int createContainer(struct WorkerTaskDetail *wtd) {
 	wtd->worker_fd = uds[0];
 	wtd->container_pid = container_pid;
 	addFDToEpoll(uds[0], EPOLL_OUT | EPOLL_DESTROY, wtd->worker_sd);
+
+	printc(INFO, "worker - createContainer", "Container created\n");
 }
 
 /**
@@ -608,6 +651,7 @@ void sendHeartbeat() {
 	}
 
 	if (memcmp(monitorAddr, emptyAddr, addrLen) == 0) {
+		printc(INFO, "worker - sendHeartbeat", "Discovering monitor\n");
 		sendDiscoveryPacket();
 		return;
 	}
@@ -617,6 +661,9 @@ void sendHeartbeat() {
 	hb->node_type = WORKER_NODE;
 	hb->UID = UID;
 	hb->load = getLoad();
+
+	printc(INFO, "worker - sendHeartbeat", "Sending heartbeat, load: %d\n",
+		   hb->load);
 
 	sendto(hb_fd, hb, hb_size, 0, monitorAddr, addrLen);
 }

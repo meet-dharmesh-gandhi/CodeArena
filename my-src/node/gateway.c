@@ -67,16 +67,18 @@ const hp_size = sizeof(struct heartbeat_packet);
 
 napi_value Init(napi_env env, napi_value exports) {
 	if (garp() == NO) {
-		printc(RED, "Init", "garp failed\n");
-		return napiUndefined(env);
+		printc(RED, "Gateway - Init", "garp failed\n");
+		napi_set_named_property(env, exports, "ok", napiBool(env, 0));
+		return exports;
 	}
 
 	UID = randInt(-1, MAX_UID);
 
 	if (UID == -1) {
-		napi_value res;
-		napi_get_undefined(env, &res);
-		return res;
+		printc(RED, "Gateway - Init", "UID failed\n");
+		perror("getrandom");
+		napi_set_named_property(env, exports, "ok", napiBool(env, 0));
+		return exports;
 	}
 
 	taskList = malloc(taskListLength);
@@ -128,6 +130,7 @@ napi_value Init(napi_env env, napi_value exports) {
 	napi_set_named_property(env, exports, "createTasks", CreateTaskFN);
 	napi_set_named_property(env, exports, "onDrain", OnDrainFN);
 	napi_set_named_property(env, exports, "onMessage", OnMessage);
+	napi_set_named_property(env, exports, "ok", napiBool(env, 1));
 
 	return exports;
 }
@@ -244,8 +247,10 @@ napi_value handle_hb_fd(uv_poll_t *handle, int status, int events) {
 
 		if (res == EXIT_SUCCESS) {
 			if (memcmp(addr, monitorAddr, addrLen) == 0) {
+				printc(RED, "Gateway - handle_hb_fd", "Existing monitor\n");
 				monitor_last_shouted = getCurrTime();
 			} else if (getCurrTime() - monitor_last_shouted > EXPIRE_PERIOD) {
+				printc(RED, "Gateway - handle_hb_fd", "New monitor\n");
 				monitorAddr = addr;
 				monitor_last_shouted = getCurrTime();
 				// TODO this gateway is dead for the monitor, just become an
@@ -266,12 +271,17 @@ napi_value handle_accept_assigner_fd(uv_poll_t *handle, int status,
 	}
 
 	while (1) {
-		int res = accept(accept_assigner_fd, &addr, addrLen);
+		int res = accept(accept_assigner_fd, addr, addrLen);
 
 		if (res < 0) {
 			if (errno == EAGAIN || errno == EWOULDBLOCK) {
+				printc(RED, "Gateway - handle_accept_assigner_fd",
+					   "Connections list over\n");
 				break;
 			}
+			printc(RED, "Gateway - handle_accept_assigner_fd",
+				   "Accept error\n");
+			perror("accept");
 			continue;
 		}
 
@@ -281,12 +291,16 @@ napi_value handle_accept_assigner_fd(uv_poll_t *handle, int status,
 		struct Task *t = setTaskFD(res);
 
 		if (t == NULL) {
+			printc(RED, "Gateway - handle_accept_assigner_fd",
+				   "No empty task found\n");
 			continue;
 		}
 
 		uv_loop_t *node_loop = getUVLoop(t->env);
 
 		if (node_loop == NULL) {
+			printc(RED, "Gateway - handle_accept_assigner_fd",
+				   "Libuv event loop not found\n");
 			t->assigner_fd = -1;
 			continue;
 		}
@@ -314,6 +328,8 @@ napi_value handle_assigner_fd(uv_poll_t *handle, int status, int events) {
 
 		if (sent < required) {
 			t->buf_ptr += max(sent, 0);
+			printc(RED, "Gateway - handle_assigner_fd",
+				   "Buffer not yet sent\n");
 			return;
 		}
 
@@ -321,19 +337,23 @@ napi_value handle_assigner_fd(uv_poll_t *handle, int status, int events) {
 		napi_value global;
 		status = napi_get_global(t->env, &global);
 		if (status != napi_ok) {
+			printc(RED, "Gateway - handle_assigner_fd",
+				   "Could not get global\n");
 			return;
 		}
 
 		napi_status status =
 			napi_call_function(t->env, global, t->cb, 1, t->taskID, NULL);
 		if (status != napi_ok) {
-			printNapiError(t->env, "handle_assigner_fd");
-			return napiUndefined(t->env);
+			printc(RED, "Gateway - handle_assigner_fd", "Call to cb failed\n");
+			return;
 		}
 
 		modifyFDInNodeEpoll(&t->poll_handle, UV_READABLE, handle_assigner_fd,
 							handle_assigner_fd_close);
 	} else if (events & UV_DISCONNECT) {
+		printc(RED, "Gateway - handle_assigner_fd", "assigner disconnected\n");
+		// TODO wait for buddy
 		// close the websocket
 		napi_value global;
 		status = napi_get_global(t->env, &global);
@@ -371,6 +391,8 @@ napi_value handle_assigner_fd(uv_poll_t *handle, int status, int events) {
 						t->env, MAX_DATA_CAPACITY, &buffer_data, &buffer);
 
 					if (status != napi_ok) {
+						printc(RED, "Gateway - handle_assigner_fd",
+							   "Could not create napi buffer\n");
 						printNapiError(t->env,
 									   "handle_assigner_fd - UV_READABLE");
 						continue;
@@ -380,6 +402,8 @@ napi_value handle_assigner_fd(uv_poll_t *handle, int status, int events) {
 
 					napi_value global = getNapiGlobal(t->env);
 					if (global == NULL) {
+						printc(RED, "Gateway - handle_assigner_fd",
+							   "Could not get global\n");
 						return napiUndefined(t->env);
 					}
 
@@ -387,6 +411,8 @@ napi_value handle_assigner_fd(uv_poll_t *handle, int status, int events) {
 					status = napi_call_function(t->env, global, t->message_cb,
 												1, &buffer, &result);
 					if (status != napi_ok) {
+						printc(RED, "Gateway - handle_assigner_fd",
+							   "Could not call message_cb\n");
 						printNapiError(t->env,
 									   "handle_assigner_fd - message_cb");
 						return napiUndefined(t->env);
@@ -395,6 +421,8 @@ napi_value handle_assigner_fd(uv_poll_t *handle, int status, int events) {
 					napi_value var_type;
 					status = napi_typeof(t->env, result, &var_type);
 					if (status != napi_ok || var_type != napi_boolean) {
+						printc(RED, "Gateway - handle_assigner_fd",
+							   "Function did not return boolean\n");
 						printNapiError(
 							t->env,
 							"handle_assigner_fd - return type message_cb");
@@ -404,6 +432,8 @@ napi_value handle_assigner_fd(uv_poll_t *handle, int status, int events) {
 					int wsFilled;
 					status = napi_get_value_bool(t->env, result, &wsFilled);
 					if (status != napi_ok) {
+						printc(RED, "Gateway - handle_assigner_fd",
+							   "Could not read boolean\n");
 						printNapiError(t->env, "handle_assigner_fd - return "
 											   "type message_cb extract");
 						return napiUndefined(t->env);
@@ -411,6 +441,8 @@ napi_value handle_assigner_fd(uv_poll_t *handle, int status, int events) {
 
 					if (wsFilled == 1) {
 						// stop the assigner
+						printc(RED, "Gateway - handle_assigner_fd",
+							   "WS filled\n");
 						uv_poll_stop(&t->poll_handle);
 					}
 				}
@@ -437,6 +469,8 @@ napi_value handle_find_fd(uv_poll_t *handle, int status, int events) {
 			memcpy(fonp, buf, fonp_size);
 
 			if (fonp->is_monitor == 1) {
+				printc(RED, "Gateway - handle_find_fd", "Send fonp to: %s\n",
+					   getPrintableIP(addr));
 				// send fnp packet again
 				sendFindNodePacket(0);
 				continue;
@@ -445,12 +479,18 @@ napi_value handle_find_fd(uv_poll_t *handle, int status, int events) {
 			// remove from retryList
 			if (removeFromRetryList(find_fd, fonp->packet_type, fonp_size) ==
 				NO) {
+				printc(RED, "Gateway - handle_find_fd",
+					   "Not found in retry list\n");
 				continue;
 			}
 			for (int i = 0; i < taskListLength; i++) {
 				if (taskList[i].filled == 1 && taskList[i].assigner_fd == -1) {
 					// send task packet to assigner
+					printc(RED, "Gateway - handle_find_fd",
+						   "Send task packet to: %s\n",
+						   getPrintableIP(&fonp->addr));
 					sendTaskPacket(i);
+					break;
 				}
 			}
 		} else if (res != 2) {
@@ -466,6 +506,7 @@ napi_value OnMessage(napi_env env, napi_callback_info info) {
 
 	status = napi_get_cb_info(env, info, &argc, &args, NULL, NULL);
 	if (status != napi_ok || argc < 2) {
+		printc(RED, "Gateway - OnMessage", "Could not get args\n");
 		printNapiError(env, "OnMessage");
 		return napiUndefined(env);
 	}
@@ -473,6 +514,7 @@ napi_value OnMessage(napi_env env, napi_callback_info info) {
 	int res;
 	status = napi_is_buffer(env, args[0], res);
 	if (status != napi_ok || res != 1) {
+		printc(RED, "Gateway - OnMessage", "First argument not a buffer\n");
 		printNapiError(env, "OnMessage - res");
 		return napiUndefined(env);
 	}
@@ -481,6 +523,7 @@ napi_value OnMessage(napi_env env, napi_callback_info info) {
 	int bufLen = MAX_DATA_CAPACITY;
 	status = napi_get_buffer_info(env, args[0], &buf, &bufLen);
 	if (status != napi_ok) {
+		printc(RED, "Gateway - OnMessage", "Could not get buffer info\n");
 		printNapiError(env, "OnMessage - buffer");
 		return napiUndefined(env);
 	}
@@ -488,6 +531,8 @@ napi_value OnMessage(napi_env env, napi_callback_info info) {
 	int taskID;
 	status = napi_get_value_int32(env, args[1], &taskID);
 	if (status != napi_ok || taskID < 0 || taskID >= taskListLength) {
+		printc(RED, "Gateway - OnMessage",
+			   "Could not get taskID or taskID out of range\n");
 		printNapiError(env, "OnMessage - taskID");
 		return napiUndefined(env);
 	}
@@ -506,7 +551,7 @@ napi_value OnMessage(napi_env env, napi_callback_info info) {
 
 		uv_poll_start(&t->poll_handle, UV_WRITABLE, handle_assigner_fd);
 
-		// TODO tcp is duoplex, so I cannot stop reading if I want to check
+		// TODO tcp is duplex, so I cannot stop reading if I want to check
 		// writing, get some good solution
 
 		return napiBool(env, 1);
@@ -521,6 +566,7 @@ napi_value OnDrain(napi_env env, napi_callback_info info) {
 
 	status = napi_get_cb_info(env, info, &argc, &args, NULL, NULL);
 	if (status != napi_ok || argc < 1) {
+		printc(RED, "Gateway - OnDrain", "Could not get args\n");
 		printNapiError(env, "OnDrain");
 		return napiUndefined(env);
 	}
@@ -528,12 +574,15 @@ napi_value OnDrain(napi_env env, napi_callback_info info) {
 	int taskID;
 	status = napi_get_value_int32(env, args[0], &taskID);
 	if (status != napi_ok || taskID < 0 || taskID >= taskListLength) {
+		printc(RED, "Gateway - OnDrain",
+			   "Could not get TaskID or TaskID out of range\n");
 		printNapiError(env, "OnDrain - taskID");
 		return napiUndefined(env);
 	}
 
 	if (uv_poll_start(&taskList[taskID].poll_handle, UV_READABLE,
 					  handle_assigner_fd) < 0) {
+		printc(RED, "Gateway - OnDrain", "uv_poll_start errored\n");
 		uv_close(&taskList[taskID].poll_handle, handle_assigner_fd_close);
 		taskList[taskID].filled = 0;
 	}
@@ -549,6 +598,7 @@ napi_value CreateTask(napi_env env, napi_callback_info info) {
 	status = napi_get_cb_info(env, info, &argc, args, &jsthis, NULL);
 
 	if (status != napi_ok || monitorAddr == NULL) {
+		printc(RED, "Gateway - CreateTask", "Could not parse args\n");
 		return napiUndefined(env);
 	}
 
@@ -556,24 +606,28 @@ napi_value CreateTask(napi_env env, napi_callback_info info) {
 	status = napi_typeof(env, args[0], &value_type);
 
 	if (status != napi_ok || value_type != napi_function) {
+		printc(RED, "Gateway - CreateTask", "First argument not function\n");
 		return napiInt32(env, UNKNOWN);
 	}
 
 	status = napi_typeof(env, args[1], &value_type);
 
 	if (status != napi_ok || value_type != napi_function) {
+		printc(RED, "Gateway - CreateTask", "Second argument not function\n");
 		return napiInt32(env, UNKNOWN);
 	}
 
 	status = napi_typeof(env, args[2], &value_type);
 
 	if (status != napi_ok || value_type != napi_function) {
+		printc(RED, "Gateway - CreateTask", "Third argument not function\n");
 		return napiInt32(env, UNKNOWN);
 	}
 
 	struct Task *task = addTask(env, args[0], args[1], args[2]);
 
 	if (task == NULL) {
+		printc(RED, "Gateway - CreateTask", "Task list full\n");
 		return napiInt32(env, NO);
 	}
 
@@ -606,6 +660,7 @@ struct Task *addTask(napi_env env, napi_value cb, napi_value close_cb,
 
 void sendHeartbeat() {
 	if (memcmp(monitorAddr, emptyAddr, addrLen) == 0) {
+		printc(RED, "Gateway - sendHeartbeat", "No monitor\n");
 		return;
 	}
 
@@ -614,6 +669,8 @@ void sendHeartbeat() {
 	hp->node_type = GATEWAY_NODE;
 	hp->UID = UID;
 	hp->load = getNumberOfTasks();
+	printc(RED, "Gateway - sendHeartbeat", "Sending heartbeat to %s\n",
+		   getPrintableIP(monitorAddr));
 	sendto(hb_fd, hp, hp_size, 0, monitorAddr, addrLen);
 }
 
@@ -630,7 +687,7 @@ void retryPackets() {
 	for (int i = 0; i < retryPacketListLength; i++) {
 		if (retryPacketList[i].filled == 1) {
 			sendto(retryPacketList[i].fd, &retryPacketList[i].packet,
-				   retryPacketList[i].packet_size, 0, retryPacketList[i].addr,
+				   retryPacketList[i].packet_size, 0, &retryPacketList[i].addr,
 				   addrLen);
 			retryPacketList[i].last_sent = getCurrTime();
 		}

@@ -13,6 +13,11 @@
 #define WHT "\x1b[37m"
 #define RST "\x1b[0m"
 
+#define ERR RED
+#define INFO WHT
+#define SUCCESS GRN
+#define IMP CYN
+
 enum Packets {
 	TASK_PACKET,
 	FIND_NODE_PACKET,
