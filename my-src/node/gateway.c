@@ -562,9 +562,6 @@ napi_value OnMessage(napi_env env, napi_callback_info info) {
 
 		uv_poll_start(&t->poll_handle, UV_WRITABLE, handle_assigner_fd);
 
-		// TODO tcp is duplex, so I cannot stop reading if I want to check
-		// writing, get some good solution
-
 		return napiBool(env, 1);
 	}
 	return napiBool(env, 0);
