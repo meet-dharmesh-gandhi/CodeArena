@@ -123,6 +123,8 @@ void handle_timer_fd(struct socketDetails *sd) {
 	sendRolePackets();
 }
 
+// TODO Monitor should send demote / promote
+// packets to other nodes too
 void handle_role_fd(struct socketDetails *sd) {
 	while (1) {
 		int res =
@@ -201,22 +203,7 @@ void handle_find_fd(struct socketDetails *sd) {
 
 					// no assigner found anywhere, return an empty address
 					sendFoundNodePacket(0, emptyAddr, addr);
-				} else if (fnp->node_type == ASSIGNER_NODE &&
-						   fnp->target_node_type == ASSIGNER_NODE) {
-					printc(INFO, "monitor - handle_find_fd",
-						   "Assigner wants buddy: %s\n", getPrintableIP(addr));
-					// find an assigner with no buddy
-					int buddyInd = findBuddy();
-
-					if (buddyInd != NO) {
-						// found a buddy, send the reply
-						sendFoundNodePacket(0, &nodeList[buddyInd].addr, addr);
-					}
-					// in case no buddy is found, remain silent
-					// since this packet is not retried by the
-					// assigner
-				} else if (fnp->node_type == ASSIGNER_NODE &&
-						   fnp->target_node_type == WORKER_NODE) {
+				} else if (fnp->node_type == ASSIGNER_NODE) {
 					printc(INFO, "monitor - handle_find_fd",
 						   "Assigner wants worker: %s\n", getPrintableIP(addr));
 					// find a worker with the least capacity
@@ -544,7 +531,6 @@ void sendHeartbeat() {
 	mhb->packet_type = MONITOR_HEARTBEAT_PACKET;
 	mhb->node_type = MONITOR_NODE;
 	mhb->UID = UID;
-	mhb->has_assigner_without_buddy = findBuddy() == NO ? 0 : 1;
 	int assignerInd = getLocalMinLoadedAssigner();
 	mhb->min_load_assigner =
 		assignerInd == NO ? -1 : nodeList[assignerInd].load;
@@ -558,12 +544,11 @@ void sendHeartbeat() {
 	mhb->gateway_load = getGatewayLoad();
 
 	printc(INFO, "monitor - sendHeartbeat",
-		   "Heartbeat - has_assigner_without_buddy: %d, min_load_assigner: %d, "
+		   "Heartbeat - min_load_assigner: %d, "
 		   "min_load_worker: %d, assigners: %d, workers: %d, gateways: %d, "
 		   "totalNodes: %d, gateway_load: %d\n",
-		   mhb->has_assigner_without_buddy, mhb->min_load_assigner,
-		   mhb->min_load_worker, mhb->assigners, mhb->workers, mhb->gateways,
-		   mhb->totalNodes, mhb->gateway_load);
+		   mhb->min_load_assigner, mhb->min_load_worker, mhb->assigners,
+		   mhb->workers, mhb->gateways, mhb->totalNodes, mhb->gateway_load);
 
 	// broadcast the heartbeat
 	sendto(hb_fd, mhb, mhb_size, 0, broadcastAddr, addrLen);
@@ -683,7 +668,6 @@ void registerNodeHeartbeat() {
 		nodeList[emptyNode].filled = 1;
 		nodeList[emptyNode].nodeType = hb->node_type;
 		nodeList[emptyNode].UID = hb->UID;
-		nodeList[emptyNode].hasBuddy = hb->has_buddy;
 		nodeList[emptyNode].load = hb->load;
 		nodeList[emptyNode].lastShouted = getCurrTime();
 		memcpy(&nodeList[emptyNode].addr, addr, addrLen);
@@ -692,7 +676,6 @@ void registerNodeHeartbeat() {
 		printc(IMP, "assigner - registerNodeHeartbeat", "Existing node: %s\n",
 			   getPrintableIP(addr));
 		nodeList[nodeInd].load = hb->load;
-		nodeList[nodeInd].hasBuddy = hb->has_buddy;
 		nodeList[nodeInd].lastShouted = getCurrTime();
 	}
 }

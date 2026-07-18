@@ -353,7 +353,6 @@ napi_value handle_assigner_fd(uv_poll_t *handle, int status, int events) {
 							handle_assigner_fd_close);
 	} else if (events & UV_DISCONNECT) {
 		printc(RED, "Gateway - handle_assigner_fd", "assigner disconnected\n");
-		// TODO wait for buddy
 		// close the websocket
 		napi_value global;
 		status = napi_get_global(t->env, &global);
@@ -715,7 +714,6 @@ void sendFindNodePacket(int shouldRetry) {
 	fnp->packet_type = FIND_NODE_PACKET;
 	fnp->node_type = GATEWAY_NODE;
 	fnp->UID = UID;
-	fnp->target_node_type = ASSIGNER_NODE;
 	fnp->was_redirected = 0;
 	sendto(find_fd, fnp, fnp_size, 0, monitorAddr, addrLen);
 

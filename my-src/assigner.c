@@ -6,8 +6,9 @@ Arena arena;
 
 struct TaskDetail *taskList;
 const int taskListLength = sizeof(struct TaskDetail) * ASSIGNER_CAPACITY;
-struct TaskDetail *buddyTaskList;
-const int buddyTaskListLength = sizeof(struct TaskDetail) * ASSIGNER_CAPACITY;
+struct IntermediateBuffer *intermediateBufferList;
+const int intermediateBufferListLength =
+	sizeof(struct IntermediateBuffer) * ASSIGNER_CAPACITY;
 struct NodeDetail *monitorList;
 const int monitorListLength = sizeof(struct NodeDetail) * ASSIGNER_CAPACITY;
 struct RetryPacket *retryPacketsList;
@@ -17,28 +18,17 @@ struct ExpectedConnection *expectedConnectionsList;
 const int expectedConnectionsListLength =
 	sizeof(struct ExpectedConnection) * ASSIGNER_CAPACITY;
 
-struct sockaddr_in *gatewayAddr;
 struct sockaddr_in *monitorAddr;
-struct sockaddr_in *buddyAddr;
 struct sockaddr_in *addr;
 struct sockaddr_in *emptyAddr;
 struct sockaddr_in *broadcastAddr;
 const int addrLen = sizeof(struct sockaddr_in);
 
-uint8_t *inputBuffer;
-const int inputBufferSize = sizeof(uint8_t) * sizeof(struct io_packet);
-int *inputBufferPtr;
-uint8_t *buddyBuffer;
-const int buddyBufferSize =
-	sizeof(uint8_t) * sizeof(struct buddy_heartbeat_packet);
-int *buddyBufferPtr;
-
-int task_fd, find_fd, hb_fd, role_fd, discover_fd, gateway_fd, buddy_fd,
-	timer_fd, accept_buddy_fd, accept_worker_fd;
+int task_fd, find_fd, hb_fd, role_fd, discover_fd, gateway_fd, timer_fd,
+	accept_worker_fd;
 
 struct socketDetails *task_fd_sd, *find_fd_sd, *hb_fd_sd, *role_fd_sd,
-	*gateway_fd_sd, *buddy_fd_sd, *timer_fd_sd, *accept_buddy_fd_sd,
-	*accept_worker_fd_sd;
+	*gateway_fd_sd, *timer_fd_sd, *accept_worker_fd_sd;
 
 uint8_t *fd_buf;
 const int fdBufSize = sizeof(uint8_t) * LARGEST_PACKET;
@@ -59,26 +49,10 @@ struct task_over_packet *top;
 const int top_size = sizeof(struct task_over_packet);
 struct monitor_heartbeat_packet *mhp;
 const int mhp_size = sizeof(struct monitor_heartbeat_packet);
-struct be_buddy_packet *bbp;
-const int bbp_size = sizeof(struct be_buddy_packet);
-struct resume_task_worker_packet *rtwp;
-const int rtwp_size = sizeof(struct resume_task_worker_packet);
-struct resume_task_gateway_packet *rtgp;
-const int rtgp_size = sizeof(struct resume_task_gateway_packet);
 struct heartbeat_packet *hb;
 const int hb_size = sizeof(struct heartbeat_packet);
 struct find_monitor_packet *fmp;
 const int fmp_size = sizeof(struct find_monitor_packet);
-struct buddy_heartbeat_packet *bhp;
-const int bhp_size = sizeof(struct buddy_heartbeat_packet);
-
-struct tcp_session {
-	int worker_fd;
-	uint8_t *buf;
-	int buf_ptr;
-	uint8_t *g_buf;
-	int g_buf_ptr;
-};
 
 // TODO implemented memory conservation
 int main(int argc, char const *argv[]) {
@@ -92,26 +66,17 @@ int main(int argc, char const *argv[]) {
 	arena = createArena(ARENA_SIZE);
 
 	taskList = amalloc(&arena, taskListLength);
-	buddyTaskList = amalloc(&arena, buddyTaskListLength);
 	monitorList = amalloc(&arena, monitorListLength);
 	retryPacketsList = amalloc(&arena, retryPacketsListLength);
+	intermediateBufferList = amalloc(&arena, intermediateBufferListLength);
 	expectedConnectionsList = amalloc(&arena, expectedConnectionsListLength);
 
-	gatewayAddr = amalloc(&arena, addrLen);
 	monitorAddr = amalloc(&arena, addrLen);
-	buddyAddr = amalloc(&arena, addrLen);
 	emptyAddr = amalloc(&arena, addrLen);
 	broadcastAddr = amalloc(&arena, addrLen);
 	addr = amalloc(&arena, addrLen);
 
 	set_broadcast_addr(DISCOVER_PORT, broadcastAddr);
-
-	inputBuffer = amalloc(&arena, inputBufferSize);
-	inputBufferPtr = amalloc(&arena, sizeof(int));
-	*inputBufferPtr = 0;
-	buddyBuffer = amalloc(&arena, buddyBufferSize);
-	buddyBufferPtr = amalloc(&arena, sizeof(int));
-	*buddyBufferPtr = 0;
 
 	task_fd = getNewSocket(TASK_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
 	find_fd = getNewSocket(FIND_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
@@ -120,8 +85,6 @@ int main(int argc, char const *argv[]) {
 	discover_fd = getNewSocket(DISCOVER_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
 
 	gateway_fd = getNewSocket(TASK_PORT, SOCKET_TIMEOUT, SOCK_STREAM);
-	buddy_fd = getNewSocket(HEARTBEAT_PORT, SOCKET_TIMEOUT, SOCK_STREAM);
-	accept_buddy_fd = getNewSocket(BUDDY_PORT, SOCKET_TIMEOUT, SOCK_STREAM);
 	accept_worker_fd = getNewSocket(TASK_PORT, SOCKET_TIMEOUT, SOCK_STREAM);
 
 	timer_fd = getNewTimerFD(CLOCK_MONOTONIC, HEARTBEAT_INTERVAL,
@@ -137,12 +100,8 @@ int main(int argc, char const *argv[]) {
 	iop = amalloc(&arena, iop_size);
 	top = amalloc(&arena, top_size);
 	mhp = amalloc(&arena, mhp_size);
-	bbp = amalloc(&arena, bbp_size);
-	rtwp = amalloc(&arena, rtwp_size);
-	rtgp = amalloc(&arena, rtgp_size);
 	hb = amalloc(&arena, hb_size);
 	fmp = amalloc(&arena, fmp_size);
-	bhp = amalloc(&arena, bhp_size);
 
 	task_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
 	task_fd_sd->fd = task_fd;
@@ -174,18 +133,6 @@ int main(int argc, char const *argv[]) {
 	gateway_fd_sd->data = NULL;
 	gateway_fd_sd->events = 0;
 
-	buddy_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
-	buddy_fd_sd->fd = buddy_fd;
-	buddy_fd_sd->handler = handle_buddy_fd;
-	buddy_fd_sd->data = NULL;
-	buddy_fd_sd->events = 0;
-
-	accept_buddy_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
-	accept_buddy_fd_sd->fd = accept_buddy_fd;
-	accept_buddy_fd_sd->handler = handle_accept_buddy_fd;
-	accept_buddy_fd_sd->data = NULL;
-	accept_buddy_fd_sd->events = 0;
-
 	accept_worker_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
 	accept_worker_fd_sd->fd = accept_worker_fd;
 	accept_worker_fd_sd->handler = handle_accept_worker_fd;
@@ -201,8 +148,7 @@ int main(int argc, char const *argv[]) {
 	printc(INFO, "assigner - main", "starting event loop\n");
 
 	startLoop(MAX_EVENTS, 9, task_fd_sd, find_fd_sd, hb_fd_sd, role_fd_sd,
-			  gateway_fd_sd, buddy_fd_sd, accept_buddy_fd_sd,
-			  accept_worker_fd_sd, timer_fd_sd);
+			  gateway_fd_sd, accept_worker_fd_sd, timer_fd_sd);
 
 	printc(INFO, "assigner - main", "stopping event loop\n");
 
@@ -243,51 +189,6 @@ void handle_timer_fd(struct socketDetails *sd) {
 
 	// then retry all packets in the retry list
 	retryPackets();
-
-	// finally send heartbeat to the buddy
-	sendBuddyHeartbeat();
-}
-
-void handle_accept_buddy_fd(struct socketDetails *sd) {
-	if (sd->events && EPOLLIN) {
-		// new connection request(s)
-
-		while (1) {
-			int res = accept(sd->fd, addr, addrLen);
-
-			if (res < 0) {
-				if (errno == EAGAIN || errno == EWOULDBLOCK) {
-					// no more connections
-					break;
-				} else {
-					continue;
-				}
-			} else {
-				// check if the connection was expected
-				for (int i = 0; i < expectedConnectionsListLength; i++) {
-					if (expectedConnectionsList[i].filled == 1 &&
-						memcmp(&expectedConnectionsList[i].addr, addr,
-							   addrLen) == 0) {
-						printc(IMP, "assigner - accept_buddy_fd",
-							   "new buddy recved %s\n", getPrintableIP(addr));
-						if (hasBuddy() == NO) {
-							printc(IMP, "assigner - accept_buddy_fd",
-								   "new buddy accepted\n");
-							// connection was expected, add to epoll
-							struct socketDetails *newSd =
-								amalloc(&arena, sizeof(struct socketDetails));
-							newSd->fd = res;
-							newSd->data = NULL;
-							newSd->handler = expectedConnectionsList[i].handler;
-							addFDToEpoll(res, EPOLL_IN | EPOLL_DESTROY, sd);
-						}
-						expectedConnectionsList[i].filled = 0;
-						break;
-					}
-				}
-			}
-		}
-	}
 }
 
 void handle_accept_worker_fd(struct socketDetails *sd) {
@@ -314,92 +215,15 @@ void handle_accept_worker_fd(struct socketDetails *sd) {
 							   "new worker recved, ip: %s\n",
 							   getPrintableIP(addr));
 						// connection was expected, add to epoll
-						struct socketDetails *newSd =
-							amalloc(&arena, sizeof(struct socketDetails));
-						newSd->fd = res;
-						struct tcp_session *ts =
-							amalloc(&arena, sizeof(struct tcp_session));
-						ts->buf = amalloc(&arena, iop_size);
-						ts->buf_ptr = -1;
-						ts->g_buf = amalloc(&arena, iop_size);
-						ts->g_buf_ptr = -1;
-						ts->worker_fd = res;
-						newSd->data = ts;
-						newSd->handler = expectedConnectionsList[i].handler;
-						addFDToEpoll(res, EPOLL_IN | EPOLLOUT | EPOLL_DESTROY,
-									 newSd);
-						modifyTaskSd(newSd, addr);
+						for (int i = 0; i < taskListLength; i++) {
+							if (taskList[i].filled == 1 &&
+								taskList[i].bottom_fd == -1) {
+								taskList[i].bottom_fd = res;
+							}
+						}
 						expectedConnectionsList[i].filled = 0;
 						break;
 					}
-				}
-
-				// if this is a buddy task, then update in the buddy task list
-				for (int i = 0; i < buddyTaskListLength; i++) {
-					if (buddyTaskList[i].filled == 1 &&
-						memcmp(&buddyTaskList[i].addr, addr, addrLen) == 0) {
-						printc(INFO, "assigner - accept_worker_fd",
-							   "buddy task");
-						// this is a buddy task
-						buddyTaskList[i].fd = res;
-						break;
-					}
-				}
-			}
-		}
-	}
-}
-
-void handle_buddy_fd(struct socketDetails *sd) {
-	int events = sd->events;
-
-	if (events & EPOLLOUT) {
-		// socket connected
-		modifyFDInEpoll(sd->fd, EPOLL_IN | EPOLL_DESTROY, sd);
-		printc(INFO, "assigner - handle_buddy_fd",
-			   "buddy accepted connected\n");
-	} else if (events & EPOLL_DESTROY) {
-		// buddy dead
-		printc(RED, "assigner - handle_buddy_fd", "buddy dead!\n");
-		int taskIDs[buddyTaskListLength];
-		int tasks = 0;
-		for (int i = 0; i < buddyTaskListLength; i++) {
-			if (buddyTaskList[i].filled == 1) {
-				buddyTaskList[i].isBuddyTask = 0;
-				buddyTaskList[i].fd = -1;
-				sendResumeTaskPacket(&buddyTaskList[i].addr,
-									 buddyTaskList[i].taskID);
-				taskIDs[tasks] = buddyTaskList[i].taskID;
-				tasks++;
-			}
-		}
-
-		if (tasks > 0) {
-			// since it is tcp the packet will reach the gateway
-			// hence we don't need to wait for any acknowldgement
-			// we just have to check if the gateway cancels a task
-			sendResumeTasksPacket(tasks, taskIDs);
-		}
-	} else if (events & EPOLLIN) {
-		// message from buddy
-		// copy to
-		while (1) {
-			int packet_type =
-				getPacketType(sd->fd, buddyBuffer, buddyBufferPtr);
-
-			if (packet_type == BUDDY_HEARTBEAT_PACKET) {
-				// copy to bhp
-				int done = getPacketData(sd->fd, buddyBuffer, &buddyBufferPtr,
-										 bhp, bhp_size);
-
-				if (done == YES) {
-					printc(INFO, "assigner - handle_buddy_fd",
-						   "buddy heartbeat\n");
-
-					memcpy(buddyTaskList, bhp->taskDetails,
-						   buddyTaskListLength);
-
-					memcpy(gatewayAddr, &bhp->gatewayAddr, addrLen);
 				}
 			}
 		}
@@ -421,45 +245,6 @@ void handle_hb_fd(struct socketDetails *sd) {
 
 				// store this monitor's heartbeat
 				addMonitorNode();
-
-				if (memcmp(buddyAddr, emptyAddr, addrLen) == 0 &&
-					mhp->has_assigner_without_buddy == 1) {
-					// no buddy, send an addr request
-					printc(INFO, "assigner - handle_hb_fd",
-						   "buddy request sent\n");
-					sendFindNodePacket(addr, 0, 0, ASSIGNER_NODE);
-				}
-			} else if (packet_type == FIND_NODE_PACKET) {
-				// copy to fonp
-				memcpy(fonp, fd_buf, fonp_size);
-
-				printc(INFO, "assigner - handle_hb_fd", "found node %d\n",
-					   fonp->is_monitor);
-				if (fonp->is_monitor != 1) {
-					// got buddy address
-					sendBeBuddyPacket(&fonp->addr);
-				}
-			} else if (packet_type == BE_BUDDY_PACKET) {
-				printc(INFO, "assigner - handle_hb_fd", "be buddy\n");
-				// check if this node sent it
-				if (bbp->UID == UID) {
-					continue;
-				}
-
-				if (hasBuddy() == YES) {
-					// has a buddy already, so no need to acknowledge
-					continue;
-				}
-				printc(INFO, "assigner - handle_hb_fd",
-					   "be buddy - accepted\n");
-				struct socketDetails *newSd =
-					amalloc(&arena, sizeof(struct socketDetails));
-				memcpy(newSd, sd, sizeof(struct socketDetails));
-				newSd->fd = buddy_fd;
-				newSd->events = EPOLLET | EPOLLOUT;
-				newSd->data = NULL;
-				newSd->handler = handle_buddy_fd;
-				requestTCPConnection(buddy_fd, addr, newSd);
 			}
 		}
 	}
@@ -467,88 +252,90 @@ void handle_hb_fd(struct socketDetails *sd) {
 
 void handle_gateway_fd(struct socketDetails *sd) {
 	int events = sd->events;
+	struct IntermediateBuffer *ib = (struct IntermediateBuffer *)sd->data;
 
 	if (events & EPOLLOUT) {
 		for (int i = 0; i < taskListLength; i++) {
 			if (taskList[i].filled == 1) {
-				struct tcp_session *ts =
-					(struct tcp_session *)taskList[i].sd->data;
-				if (ts->buf_ptr != -1) {
+				if (taskList[i].bottom_buf_ptr != -1) {
 					printc(INFO, "assigner - handle_gateway_fd",
 						   "Sending data of task %d to gateway\n", i);
 
-					int required = iop_size - ts->buf_ptr;
-					int sent = send(sd->fd, ts->buf + ts->buf_ptr, required, 0);
+					struct TaskDetail *t = &taskList[i];
+					int required = iop_size - t->bottom_buf_ptr;
+					int sent = send(sd->fd, t->bottom_buf + t->bottom_buf_ptr,
+									required, 0);
 
 					if (sent < required) {
-						ts->buf_ptr += max(sent, 0);
+						t->bottom_buf_ptr += max(sent, 0);
 						return;
 					}
 
-					ts->buf_ptr = 0;
+					t->bottom_buf_ptr = 0;
 
+					struct IntermediateBuffer *wIb = getNodeIB(t->bottom_fd);
 					// perform the tasks a worker would perform
 					while (1) {
 						int packet_type =
-							getPacketType(ts->worker_fd, ts->buf, &ts->buf_ptr);
+							getPacketType(sd->fd, wIb->buf, &wIb->buf_ptr);
 
 						if (packet_type == IO_PACKET) {
 							// copy to iop
-							int done =
-								getPacketData(ts->worker_fd, ts->buf,
-											  &ts->buf_ptr, iop, iop_size);
+							int done = getPacketData(
+								sd->fd, wIb->buf, &wIb->buf_ptr, iop, iop_size);
 
 							if (done == YES) {
+								printc(INFO, "assigner - handle_worker_fd",
+									   "Got IO packet, task: %d\n",
+									   iop->task_ID);
 								// now forward this data to the gateway
 								int sent = send(gateway_fd, iop, iop_size, 0);
 
 								if (sent < iop_size) {
-									ts->buf_ptr = max(sent, 0);
-									break;
+									struct TaskDetail *t =
+										&taskList[iop->task_ID];
+									// copy to bottom_buf
+									memcpy(t->bottom_buf, iop, iop_size);
+									t->bottom_buf_ptr = max(sent, 0);
+
+									return;
 								}
 							}
 						} else if (packet_type == TASK_OVER_PACKET) {
 							// copy to top
-							int done =
-								getPacketData(ts->worker_fd, ts->buf,
-											  &ts->buf_ptr, top, top_size);
+							int done = getPacketData(
+								sd->fd, wIb->buf, &wIb->buf_ptr, top, top_size);
 
 							if (done == YES) {
-								close(ts->worker_fd);
-								deleteFDInEpoll(ts->worker_fd);
+								close(sd->fd);
+								deleteFDInEpoll(sd->fd);
 								removeTask(top->taskID);
-								sendTaskOverPacket(gateway_fd, top->taskID);
+								sendTaskOverPacket(taskList[top->taskID].top_fd,
+												   top->taskID);
+								wIb->taken = 0;
 							}
 						} else if (packet_type == CANCEL_TASK_PACKET) {
 							// copy to ctp
-							int done =
-								getPacketData(ts->worker_fd, ts->buf,
-											  &ts->buf_ptr, ctp, ctp_size);
+							int done = getPacketData(
+								sd->fd, wIb->buf, &wIb->buf_ptr, ctp, ctp_size);
 
 							if (done == YES) {
-								sendCancelTaskPacket(gateway_fd, ctp->taskID);
+								close(sd->fd);
+								deleteFDInEpoll(sd->fd);
+								removeTask(ctp->taskID);
+								sendCancelTaskPacket(
+									taskList[ctp->taskID].top_fd, ctp->taskID);
+								wIb->taken = 0;
 							}
-						} else if (packet_type == ERROR ||
-								   packet_type == UNKNOWN) {
-							printc(INFO, "assigner - handle_gateway_fd",
-								   "All packets for task %d read\n", i);
-							// add EPOLLIN to worker socket
-							modifyFDInEpoll(ts->worker_fd,
-											EPOLL_IN | EPOLLOUT | EPOLL_DESTROY,
-											taskList[i].sd);
-
-							// also set buf_ptr to -1
-							ts->buf_ptr = -1;
+						} else if (packet_type == ERROR) {
 							break;
 						}
 					}
-				} else {
-					// the socket might be just created
-					modifyFDInEpoll(sd->fd, EPOLL_IN | EPOLLOUT | EPOLL_DESTROY,
-									sd);
 				}
 			}
 		}
+
+		modifyFDInEpoll(sd->fd, EPOLL_IN | EPOLLOUT | EPOLL_DESTROY, sd);
 	} else if (events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
 		// connection dropped
 		// remove all tasks
@@ -556,71 +343,65 @@ void handle_gateway_fd(struct socketDetails *sd) {
 		for (int i = 0; i < taskListLength; i++) {
 			taskList[i].filled = 0;
 		}
+		ib->taken = 0;
+		ib->buf_ptr = 0;
 	} else if (events & EPOLLIN) {
 		// some input from the gateway, pass it to the worker
 		while (1) {
-			int packet_type =
-				getPacketType(sd->fd, inputBuffer, inputBufferPtr);
+			int packet_type = getPacketType(sd->fd, &ib->buf, &ib->buf_ptr);
 
 			if (packet_type == IO_PACKET) {
 				// packet - iop
-				int done = getPacketData(sd->fd, inputBuffer, inputBufferPtr,
-										 iop, addrLen);
+				int done =
+					getPacketData(sd->fd, &ib->buf, &ib->buf_ptr, iop, addrLen);
 
 				if (done == YES) {
 					printc(INFO, "assigner - handle_gateway_fd",
 						   "Got IO packet, task %d\n", iop->task_ID);
 					// packet is formed
-					// find the task
-					int ind = findTask(iop->task_ID);
+					// check if the task is there
+					struct TaskDetail *t = &taskList[iop->task_ID];
+					if (t->filled == 0) {
+						// invalid taskID, ignore
+						continue;
+					}
 
-					if (ind != NO) {
-						// found the task
-						int sent = send(taskList[ind].fd, iop, iop_size, 0);
+					int sent = send(t->bottom_fd, iop, iop_size, 0);
 
-						if (sent < iop_size) {
-							struct tcp_session *ts = taskList[ind].sd->data;
+					if (sent < iop_size) {
+						// copy iop into top_buf
+						memcpy(t->top_buf, iop, iop_size);
+						t->top_buf_ptr = max(sent, 0);
 
-							// copy iop into g_buf
-							memcpy(ts->g_buf, iop, iop_size);
-							ts->g_buf_ptr = max(sent, 0);
-
-							// remove EPOLLIN from this socket
-							modifyFDInEpoll(sd->fd, EPOLL_OUT | EPOLL_DESTROY,
-											sd);
-							break;
-						}
+						// remove EPOLLIN from this socket
+						modifyFDInEpoll(sd->fd, EPOLL_OUT | EPOLL_DESTROY, sd);
+						break;
 					}
 				}
 			} else if (packet_type == TASK_OVER_PACKET) {
 				// copy to top
-				int done = getPacketData(sd->fd, inputBuffer, inputBufferPtr,
-										 top, top_size);
+				int done = getPacketData(sd->fd, &ib->buf, &ib->buf_ptr, top,
+										 top_size);
 
 				if (done == YES) {
 					close(sd->fd);
 					deleteFDInEpoll(sd->fd);
+					deleteFDInEpoll(taskList[top->taskID].bottom_fd);
 					removeTask(top->taskID);
-				}
-			} else if (packet_type == CANCEL_TASK_PACKET) {
-				// copy to ctp
-				int done = getPacketData(sd->fd, inputBuffer, inputBufferPtr,
-										 ctp, ctp_size);
-
-				if (done == YES) {
-					sendCancelTaskPackets();
+					shutdown(taskList[top->taskID].bottom_fd, SHUT_RDWR);
+					ib->taken = 0;
 				}
 			} else if (packet_type == TASK_PACKET) {
 				// copy to tp
-				int done = getPacketData(sd->fd, inputBuffer, &inputBufferPtr,
-										 tp, tp_size);
+				int done =
+					getPacketData(sd->fd, &ib->buf, &ib->buf_ptr, tp, tp_size);
 
 				if (done == YES) {
 					printc(INFO, "assigner - handle_gateway_fd",
 						   "new task via UDP %d\n", tp->taskID);
 					processTaskPacket();
 				}
-			} else if (packet_type == ERROR || packet_type == UNKNOWN) {
+			} else if (packet_type == ERROR) {
 				break;
 			}
 		}
@@ -629,108 +410,110 @@ void handle_gateway_fd(struct socketDetails *sd) {
 
 void handle_worker_fd(struct socketDetails *sd) {
 	int events = sd->events;
+	struct IntermediateBuffer *ib = (struct IntermediateBuffer *)sd->data;
 
 	if (events & EPOLLOUT) {
-		struct tcp_session *ts = (struct tcp_session *)sd->data;
+		for (int i = 0; i < taskListLength; i++) {
+			if (taskList[i].filled == 1 && taskList[i].bottom_fd == sd->fd) {
+				if (ib->buf_ptr != -1) {
+					printc(INFO, "assigner - handle_worker_fd",
+						   "Data going from worker to gateway\n");
+					int required = ib->buf_ptr + iop_size;
+					int sent =
+						send(gateway_fd, ib->buf + ib->buf_ptr, required, 0);
 
-		if (ts->g_buf_ptr != -1) {
-			printc(INFO, "assigner - handle_worker_fd",
-				   "Data going from worker to gateway\n");
-			int required = ts->g_buf_ptr + iop_size;
-			int sent = send(gateway_fd, ts->g_buf + ts->g_buf_ptr, required, 0);
+					if (send < required) {
+						ib->buf_ptr += max(sent, 0);
+						return;
+					}
 
-			if (send < required) {
-				ts->g_buf_ptr += max(sent, 0);
-				return;
-			}
+					ib->buf_ptr = 0;
 
-			ts->g_buf_ptr = 0;
+					// some input from the gateway, pass it to the worker
+					struct IntermediateBuffer *gIb =
+						getNodeIB(taskList[i].top_fd);
+					while (1) {
+						int packet_type =
+							getPacketType(sd->fd, &gIb->buf, &gIb->buf_ptr);
 
-			// some input from the gateway, pass it to the worker
-			while (1) {
-				int packet_type =
-					getPacketType(sd->fd, inputBuffer, inputBufferPtr);
+						if (packet_type == IO_PACKET) {
+							// packet - iop
+							int done = getPacketData(
+								sd->fd, &gIb->buf, &gIb->buf_ptr, iop, addrLen);
 
-				if (packet_type == IO_PACKET) {
-					// packet - iop
-					int done = getPacketData(sd->fd, inputBuffer,
-											 inputBufferPtr, iop, addrLen);
+							if (done == YES) {
+								printc(INFO, "assigner - handle_gateway_fd",
+									   "Got IO packet, task %d\n",
+									   iop->task_ID);
+								// packet is formed
+								// check if the task is there
+								struct TaskDetail *t = &taskList[iop->task_ID];
+								if (t->filled == 0) {
+									// invalid taskID, ignore
+									continue;
+								}
 
-					if (done == YES) {
-						// packet is formed
-						int sent = send(sd->fd, iop, iop_size, 0);
+								int sent = send(t->bottom_fd, iop, iop_size, 0);
 
-						if (sent < iop_size) {
-							// copy iop into g_buf
-							memcpy(ts->g_buf, iop, iop_size);
-							ts->g_buf_ptr = max(sent, 0);
+								if (sent < iop_size) {
+									// copy iop into top_buf
+									memcpy(t->top_buf, iop, iop_size);
+									t->top_buf_ptr = max(sent, 0);
+
+									return;
+								}
+							}
+						} else if (packet_type == TASK_OVER_PACKET) {
+							// copy to top
+							int done =
+								getPacketData(sd->fd, &gIb->buf, &gIb->buf_ptr,
+											  top, top_size);
+
+							if (done == YES) {
+								close(sd->fd);
+								deleteFDInEpoll(sd->fd);
+								removeTask(top->taskID);
+								ib->taken = 0;
+							}
+						} else if (packet_type == TASK_PACKET) {
+							// copy to tp
+							int done = getPacketData(
+								sd->fd, &gIb->buf, &gIb->buf_ptr, tp, tp_size);
+
+							if (done == YES) {
+								printc(INFO, "assigner - handle_gateway_fd",
+									   "new task via UDP %d\n", tp->taskID);
+								processTaskPacket();
+							}
+						} else if (packet_type == ERROR) {
 							break;
 						}
 					}
-				} else if (packet_type == TASK_OVER_PACKET) {
-					// copy to top
-					int done = getPacketData(gateway_fd, inputBuffer,
-											 inputBufferPtr, top, top_size);
-
-					if (done == YES) {
-						close(sd->fd);
-						deleteFDInEpoll(sd->fd);
-						removeTask(top->taskID);
-					}
-				} else if (packet_type == CANCEL_TASK_PACKET) {
-					// copy to ctp
-					int done = getPacketData(gateway_fd, inputBuffer,
-											 inputBufferPtr, ctp, ctp_size);
-
-					if (done == YES) {
-						sendCancelTaskPackets();
-					}
-				} else if (packet_type == TASK_PACKET) {
-					// copy to tp
-					int done = getPacketData(gateway_fd, inputBuffer,
-											 inputBufferPtr, tp, tp_size);
-
-					if (done == YES) {
-						processTaskPacket();
-					}
-				} else if (packet_type == ERROR || packet_type == UNKNOWN) {
-					printc(INFO, "assigner - handle_worker_fd",
-						   "All gateway packets processed\n");
-					// add EPOLLIN to the gateway socket
-					modifyFDInEpoll(gateway_fd,
-									EPOLL_IN | EPOLLOUT | EPOLL_DESTROY,
-									gateway_fd_sd);
-
-					// set g_buf_ptr to -1
-					ts->g_buf_ptr = -1;
-					break;
 				}
 			}
-		} else {
-			// this should not happen generally, but in case there are
-			// bugs :(
-			// add EPOLLIN to both sockets
-			modifyFDInEpoll(sd->fd, EPOLL_IN | EPOLLOUT | EPOLL_DESTROY, sd);
 		}
+
+		modifyFDInEpoll(sd->fd, EPOLL_IN | EPOLLOUT | EPOLL_DESTROY, sd);
 	} else if (events & EPOLL_DESTROY) {
 		// connection dropped
-		// TODO handle this connection drop
 		printc(INFO, "assigner - handle_worker_fd", "connection cut\n");
+		for (int i = 0; i < taskListLength; i++) {
+			if (taskList[i].filled == 1 && taskList[i].bottom_fd == sd->fd) {
+				sendCancelTaskPacket(taskList[i].top_fd, i);
+			}
+		}
+		ib->taken = 0;
+		ib->buf_ptr = 0;
 	} else if (events & EPOLLIN) {
 		// listen for incoming connections
 		// some output from the worker, pass it to the gateway
 		while (1) {
-			if (sd->data == NULL) {
-				return;
-			}
-
-			struct tcp_session *ts = (struct tcp_session *)sd->data;
-			int packet_type = getPacketType(sd->fd, ts->buf, &ts->buf_ptr);
+			int packet_type = getPacketType(sd->fd, ib->buf, &ib->buf_ptr);
 
 			if (packet_type == IO_PACKET) {
 				// copy to iop
 				int done =
-					getPacketData(sd->fd, ts->buf, &ts->buf_ptr, iop, iop_size);
+					getPacketData(sd->fd, ib->buf, &ib->buf_ptr, iop, iop_size);
 
 				if (done == YES) {
 					printc(INFO, "assigner - handle_worker_fd",
@@ -739,7 +522,10 @@ void handle_worker_fd(struct socketDetails *sd) {
 					int sent = send(gateway_fd, iop, iop_size, 0);
 
 					if (sent < iop_size) {
-						ts->buf_ptr = max(sent, 0);
+						struct TaskDetail *t = &taskList[iop->task_ID];
+						// copy to bottom_buf
+						memcpy(t->bottom_buf, iop, iop_size);
+						t->bottom_buf_ptr = max(sent, 0);
 
 						// remove EPOLLIN from this socket
 						modifyFDInEpoll(sd->fd, EPOLL_OUT | EPOLL_DESTROY, sd);
@@ -750,21 +536,28 @@ void handle_worker_fd(struct socketDetails *sd) {
 			} else if (packet_type == TASK_OVER_PACKET) {
 				// copy to top
 				int done =
-					getPacketData(sd->fd, ts->buf, &ts->buf_ptr, top, top_size);
+					getPacketData(sd->fd, ib->buf, &ib->buf_ptr, top, top_size);
 
 				if (done == YES) {
 					close(sd->fd);
 					deleteFDInEpoll(sd->fd);
 					removeTask(top->taskID);
-					sendTaskOverPacket(gateway_fd, top->taskID);
+					sendTaskOverPacket(taskList[top->taskID].top_fd,
+									   top->taskID);
+					ib->taken = 0;
 				}
 			} else if (packet_type == CANCEL_TASK_PACKET) {
 				// copy to ctp
 				int done =
-					getPacketData(sd->fd, ts->buf, &ts->buf_ptr, ctp, ctp_size);
+					getPacketData(sd->fd, ib->buf, &ib->buf_ptr, ctp, ctp_size);
 
 				if (done == YES) {
-					sendCancelTaskPacket(gateway_fd, ctp->taskID);
+					close(sd->fd);
+					deleteFDInEpoll(sd->fd);
+					removeTask(ctp->taskID);
+					sendTaskOverPacket(taskList[ctp->taskID].top_fd,
+									   ctp->taskID);
+					ib->taken = 0;
 				}
 			} else if (packet_type == ERROR || packet_type == UNKNOWN) {
 				break;
@@ -826,7 +619,7 @@ void handle_task_fd(struct socketDetails *sd) {
 				// copy to tp
 				memcpy(tp, fd_buf, tp_size);
 
-				processTaskPacket(sd);
+				processTaskPacket();
 			} else if (packet_type == CANCEL_TASK_PACKET) {
 				printc(INFO, "assigner - handle_task_fd", "Cancel Task %d\n",
 					   ctp->taskID);
@@ -852,56 +645,25 @@ void handle_task_fd(struct socketDetails *sd) {
 
 // -------------------- UTILS --------------------
 
-/**
- * Sends heartbeat to the buddy if the buddy exists
- */
-void sendBuddyHeartbeat() {
-	if (buddyAddr == NULL) {
-		return;
-	}
-
-	bhp->packet_ID = PACKET_ID;
-	bhp->packet_type = BUDDY_HEARTBEAT_PACKET;
-	bhp->node_type = ASSIGNER_NODE;
-	bhp->UID = UID;
-	memcpy(&bhp->gatewayAddr, gatewayAddr, addrLen);
-	memcpy(&bhp->taskDetails, taskList, taskListLength);
-
-	printc(INFO, "assigner - sendBuddyHeartbeat", "Gateway: %s\n",
-		   getPrintableIP(gatewayAddr));
-
-	send(buddy_fd, bhp, bhp_size, 0);
-}
-
-/**
- * Finds the task with the given task ID
- * Returns index of task in the task list
- * Returns NO if the task is not found
- */
-int findTask(int taskID) {
-	for (int i = 0; i < taskListLength; i++) {
-		if (taskList[i].filled == 1 && taskList[i].taskID == taskID) {
-			return i;
+struct IntermediateBuffer *getNodeIB(int fd) {
+	for (int i = 0; i < intermediateBufferListLength; i++) {
+		if (intermediateBufferList[i].taken == 1 &&
+			intermediateBufferList[i].fd == fd) {
+			return &intermediateBufferList[i];
 		}
 	}
 
-	return NO;
+	return getIB();
 }
 
-/**
- * This adds the sd to all the tasks with this worker
- */
-void modifyTaskSd(struct socketDetails *sd, struct sockaddr_in *given_addr) {
-	if (given_addr == NULL) {
-		given_addr = addr;
-	}
-
-	for (int i = 0; i < taskListLength; i++) {
-		if (taskList[i].filled == 1 &&
-			memcmp(&taskList[i].addr, given_addr, addrLen) == 0) {
-			taskList[i].sd = sd;
+struct IntermediateBuffer *getIB() {
+	for (int i = 0; i < intermediateBufferListLength; i++) {
+		if (intermediateBufferList[i].taken == 0) {
+			return &intermediateBufferList[i];
 		}
 	}
+
+	return NULL;
 }
 
 /**
@@ -937,7 +699,6 @@ void sendHeartbeat() {
 	hb->node_type = ASSIGNER_NODE;
 	hb->UID = UID;
 	hb->load = getCurrLoad();
-	hb->has_buddy = hasBuddy() == YES ? 1 : 0;
 
 	checkMonitor();
 
@@ -997,13 +758,6 @@ int getCurrLoad() {
 		}
 	}
 
-	// check for buddy tasks too
-	for (int i = 0; i < buddyTaskListLength; i++) {
-		if (buddyTaskList[i].filled == 1 && buddyTaskList[i].isBuddyTask == 0) {
-			load++;
-		}
-	}
-
 	printc(INFO, "assigner - getCurrLoad", "Assigner current load %d\n", load);
 	return load;
 }
@@ -1040,7 +794,6 @@ void addMonitorNode() {
 			monitorList[i].nodeType = mhp->node_type;
 			monitorList[i].UID = mhp->UID;
 			monitorList[i].load = mhp->min_load_worker;
-			monitorList[i].hasBuddy = mhp->has_assigner_without_buddy;
 			monitorList[i].lastShouted = getCurrTime();
 			memcpy(&monitorList[i].addr, addr, addrLen);
 			break;
@@ -1082,7 +835,9 @@ int processTaskPacket() {
 			amalloc(&arena, sizeof(struct socketDetails));
 		newSd->fd = gateway_fd;
 		newSd->handler = handle_gateway_fd;
-		newSd->data = NULL;
+		struct IntermediateBuffer *ib =
+			amalloc(&arena, sizeof(struct IntermediateBuffer));
+		newSd->data = ib;
 		requestTCPConnection(gateway_fd, addr, newSd);
 	}
 
@@ -1104,25 +859,6 @@ void sendTaskOverPacket(int fd, int taskID) {
 }
 
 /**
- * Sends cancel task packets to all connected
- * workers in the buddy task list
- * If the connection is still pending, this function
- * removes the entry from expected connections list
- */
-void sendCancelTaskPackets() {
-	for (int i = 0; i < buddyTaskListLength; i++) {
-		if (buddyTaskList[i].filled == 1) {
-			if (buddyTaskList[i].fd >= 0) {
-				sendCancelTaskPacket(buddyTaskList[i].fd,
-									 buddyTaskList[i].taskID);
-			} else {
-				removeExpectedConnection(TASK_PACKET, &buddyTaskList[i].addr);
-			}
-		}
-	}
-}
-
-/**
  * Sends a cancel task packet to a worker via TCP
  */
 void sendCancelTaskPacket(int fd, int taskID) {
@@ -1133,124 +869,6 @@ void sendCancelTaskPacket(int fd, int taskID) {
 	ctp->taskID = taskID;
 
 	send(fd, ctp, ctp_size, 0);
-}
-
-/**
- * Sends a resume tasks packet to the gateway
- * Sends via TCP if the connection exists
- * Sends via UDP on `given_addr` if the
- * connection does not exist
- */
-void sendResumeTasksPacket(int tasks, int *taskIDs) {
-	rtgp->packet_ID = PACKET_ID;
-	rtgp->packet_type = RESUME_TASK_PACKET;
-	rtgp->node_type = ASSIGNER_NODE;
-	rtgp->UID = UID;
-	rtgp->tasks = tasks;
-	memcpy(&rtgp->taskIDs, taskIDs, ASSIGNER_CAPACITY);
-
-	printc(INFO, "assigner - sendResumeTasksPacket",
-		   "Sent resume tasks packet to gateway\n");
-
-	// since the buddy exists,
-	// the tcp connection should be there
-	// since the buddy always sends gateway address
-	// in its heartbeat
-	send(gateway_fd, rtgp, rtgp_size, 0);
-}
-
-/**
- * Sends a resume packet to a worker
- */
-void sendResumeTaskPacket(struct sockaddr_in *given_addr, int taskID) {
-	if (given_addr == NULL) {
-		given_addr = addr;
-	}
-
-	// check if the tcp socket does exist
-	int fd = tcpConnectionExists(given_addr);
-
-	if (fd == NO) {
-		printc(INFO, "assigner - sendResumeTaskPacket",
-			   "Sent resume task packet to worker (UDP)\n");
-		// the fd does not exist, send a UDP packet
-		sendResumeTaskUDPPacket(taskID, given_addr);
-	} else {
-		// the fd does exist, simply send a tcp packet
-		printc(INFO, "assigner - sendResumeTaskPacket",
-			   "Sent resume task packet to worker (TCP)\n");
-		sendResumeTaskTCPPacket(taskID, given_addr, fd);
-	}
-}
-
-/**
- * Sends a task packet to `given_addr`
- * `given_addr` is replaced by `addr` if it is NULL
- * Returns EXIT_SUCCESS when packet sent and added to retry queue
- * Returns EXIT_FAILURE when packet not sent
- */
-int sendResumeTaskUDPPacket(int taskID, struct sockaddr_in *given_addr) {
-	if (given_addr == NULL) {
-		given_addr = addr;
-	}
-
-	rtwp->packet_ID = PACKET_ID;
-	rtwp->packet_type = TASK_PACKET;
-	rtwp->node_type = ASSIGNER_NODE;
-	rtwp->UID = UID;
-	rtwp->taskID = taskID;
-
-	int sent = sendto(task_fd, rtwp, rtwp_size, 0, given_addr, addrLen);
-
-	if (sent <= 0) {
-		return EXIT_FAILURE;
-	}
-
-	addToRetryList(task_fd, TASK_PACKET, rtwp_size, rtwp, given_addr);
-
-	addExpectedConnection(TASK_PACKET, given_addr, handle_worker_fd);
-
-	return EXIT_SUCCESS;
-}
-
-/**
- * Sends a resume task packet to `given_addr` using `fd` via TCP
- * `given_addr` is replaced by `addr` if it is NULL
- * Returns EXIT_SUCCESS when packet sent and added to retry queue
- * Returns EXIT_FAILURE when packet not sent
- */
-int sendResumeTaskTCPPacket(int taskID, struct sockaddr_in *given_addr,
-							int fd) {
-	if (given_addr == NULL) {
-		given_addr = addr;
-	}
-
-	rtwp->packet_ID = PACKET_ID;
-	rtwp->packet_type = TASK_PACKET;
-	rtwp->node_type = ASSIGNER_NODE;
-	rtwp->UID = UID;
-	rtwp->taskID = taskID;
-
-	int sent = send(fd, rtwp, rtwp_size, 0);
-
-	if (sent <= 0) {
-		return EXIT_FAILURE;
-	}
-
-	return EXIT_SUCCESS;
-}
-
-/**
- * Checks if this assigner has a buddy
- * Returns YES if the buddy exists
- * Returns NO if the buddy does not exist
- */
-int hasBuddy() {
-	if (memcmp(buddyAddr, emptyAddr, addrLen) == 0) {
-		return NO;
-	}
-
-	return YES;
 }
 
 /**
@@ -1303,33 +921,6 @@ int addExpectedConnection(int sent_packet_type, struct sockaddr_in *given_addr,
 }
 
 /**
- * Sends a Be Buddy packet to an assigner
- * If `given_addr` is NULL, `addr` is used
- * Returns YES if packet sent
- * Returns NO if packet not sent
- */
-int sendBeBuddyPacket(struct sockaddr_in *given_addr) {
-	if (given_addr == NULL) {
-		given_addr = addr;
-	}
-
-	bbp->packet_ID = PACKET_ID;
-	bbp->packet_type = BE_BUDDY_PACKET;
-	bbp->node_type = ASSIGNER_NODE;
-	bbp->UID = UID;
-	bbp->will_be_buddy = 0;
-
-	int sent = sendto(find_fd, bbp, bbp_size, 0, given_addr, addrLen);
-
-	addExpectedConnection(BE_BUDDY_PACKET, given_addr, handle_buddy_fd);
-
-	if (sent <= 0) {
-		return NO;
-	}
-	return YES;
-}
-
-/**
  * Sends a task packet to `given_addr`
  * `given_addr` is replaced by `addr` if it is NULL
  * Returns EXIT_SUCCESS when packet sent and added to retry queue
@@ -1345,8 +936,6 @@ int sendTaskPacket(int taskID, struct sockaddr_in *given_addr) {
 	tp->node_type = ASSIGNER_NODE;
 	tp->UID = UID;
 	tp->taskID = taskID;
-	memcpy(&tp->worker_addr, given_addr, addrLen);
-	memcpy(&tp->gateway_addr, gatewayAddr, addrLen);
 
 	int sent = sendto(task_fd, tp, tp_size, 0, given_addr, addrLen);
 
@@ -1367,31 +956,12 @@ int sendTaskPacket(int taskID, struct sockaddr_in *given_addr) {
  * Returns EXIT_FAILURE if task not removed
  */
 int removeTask(int taskID) {
-	for (int i = 0; i < taskListLength; i++) {
-		if (taskList[i].filled == 1 && taskList[i].taskID == taskID) {
-			taskList[i].filled = 0;
-			return EXIT_SUCCESS;
-		}
+	if (taskList[taskID].filled == 1) {
+		taskList[taskID].filled = 0;
+		return EXIT_SUCCESS;
 	}
 
 	return EXIT_FAILURE;
-}
-
-/**
- * Adds a worker address to the task list
- * Returns taskID if it succeeds
- * Returns NO if it fails
- */
-int addWorkerToTaskList(struct sockaddr_in *given_addr) {
-	for (int i = 0; i < taskListLength; i++) {
-		if (taskList[i].filled == 1 &&
-			memcmp(&taskList[i].addr, emptyAddr, addrLen) == 0) {
-			memcpy(&taskList[i].addr, given_addr, addrLen);
-			return taskList[i].taskID;
-		}
-	}
-
-	return NO;
 }
 
 /**
@@ -1409,10 +979,25 @@ int addToTaskList(int fd, int taskID, struct sockaddr_in *given_addr) {
 	for (int i = 0; i < taskListLength; i++) {
 		if (taskList[i].filled == 0) {
 			taskList[i].filled = 1;
-			taskList[i].fd = fd;
-			taskList[i].isBuddyTask = 0;
-			taskList[i].taskID = taskID;
-			memcpy(&taskList[i].addr, given_addr, addrLen);
+			taskList[i].top_fd = fd;
+			taskList[i].bottom_fd = -1;
+			taskList[i].top_buf_ptr = 0;
+			taskList[i].bottom_buf_ptr = 0;
+			taskList[i].lastConnected = getCurrTime();
+
+			taskList[i].top_sd = amalloc(&arena, sizeof(struct socketDetails));
+			taskList[i].top_sd->data = getNodeIB(fd);
+			taskList[i].top_sd->fd = fd;
+			taskList[i].top_sd->handler = handle_gateway_fd;
+			taskList[i].top_sd->events = 0;
+
+			taskList[i].bottom_sd =
+				amalloc(&arena, sizeof(struct socketDetails));
+			taskList[i].bottom_sd->data = NULL;
+			taskList[i].bottom_sd->fd = -1;
+			taskList[i].bottom_sd->handler = handle_worker_fd;
+			taskList[i].bottom_sd->events = 0;
+
 			return EXIT_SUCCESS;
 		}
 	}
@@ -1495,7 +1080,6 @@ int sendFindNodePacket(struct sockaddr_in *given_addr, int was_redirected,
 	fnp->node_type = ASSIGNER_NODE;
 	fnp->UID = UID;
 	fnp->was_redirected = was_redirected;
-	fnp->target_node_type = target_node_type;
 
 	printc(INFO, "assigner - sendFindNodePacket",
 		   "Sending Find Node Packet, target: %d\n", target_node_type);
@@ -1532,70 +1116,23 @@ struct sockaddr_in *getMinWorkerMonitor() {
 }
 
 /**
- * Adds `taskID`, `fd` and `given_addr` to the task list of the assigner
- * If `given_addr` is NULL, `addr` will be used
- * Returns EXIT_SUCCESS (0) if the task is added
- * Returns EXIT_FAILURE (1) if the task is not added
- */
-int addTask(int taskID, int fd, struct sockaddr_in *given_addr) {
-	if (given_addr == NULL) {
-		given_addr = addr;
-	}
-
-	if (fd < 0) {
-		return EXIT_FAILURE;
-	}
-
-	for (int i = 0; i < taskListLength; i++) {
-		if (taskList[i].filled == 0) {
-			taskList[i].filled = 1;
-			taskList[i].fd = fd;
-			taskList[i].isBuddyTask = 0;
-			taskList[i].taskID = taskID;
-			memcpy(&taskList[i].addr, given_addr, addrLen);
-			return EXIT_SUCCESS;
-		}
-	}
-
-	return EXIT_FAILURE;
-}
-
-/**
  * This function checks if a tcp socket to the given address
  * exists with this node
  * Returns NO is the connection does not exist
  * Returns the file descriptor if it exists
  */
-int tcpConnectionExists(struct sockaddr_in *given_addr) {
-	// check if the address is empty
-	if (memcmp(given_addr, emptyAddr, addrLen) == 0) {
-		// empty address
+int tcpConnectionExists(int fd) {
+	// check if the fd is invalid
+	if (fd < 0) {
 		return NO;
 	}
 
-	// check if this is the gateway address
-	if (memcmp(given_addr, gatewayAddr, addrLen) == 0) {
-		// this is the gateway's address
-		return gateway_fd;
-	}
-
-	// check if this is buddy's address
-	if (memcmp(given_addr, buddyAddr, addrLen) == 0) {
-		// this is buddy's address
-		return buddy_fd;
-	}
-
 	for (int i = 0; i < taskListLength; i++) {
-		if (taskList[i].filled == 1 &&
-			memcmp(&taskList[i].addr, given_addr, addrLen) == 0) {
-			return taskList[i].fd;
-		}
-	}
-
-	for (int i = 0; i < taskListLength; i++) {
-		if (buddyTaskList[i].filled == 1 && buddyTaskList[i].isBuddyTask == 0 &&
-			memcmp(&buddyTaskList[i].addr, given_addr, addrLen) == 0) {
-			return buddyTaskList[i].fd;
+		if (taskList[i].filled == 1) {
+			if (fd == taskList[i].bottom_fd)
+				return taskList[i].bottom_fd;
+			if (fd == taskList[i].top_fd)
+				return taskList[i].top_fd;
 		}
 	}
 

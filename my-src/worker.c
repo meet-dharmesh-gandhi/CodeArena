@@ -4,8 +4,11 @@ int UID;
 
 Arena arena;
 
-struct WorkerTaskDetail *taskList;
-const int taskListLength = sizeof(struct WorkerTaskDetail) * WORKER_CAPACITY;
+struct TaskDetail *taskList;
+const int taskListLength = sizeof(struct TaskDetail) * WORKER_CAPACITY;
+struct IntermediateBuffer *intermediateBufferList;
+const int intermediateBufferListLength =
+	sizeof(struct TaskDetail) * WORKER_CAPACITY;
 struct ExpectedConnection *expectedConnectionsList;
 const int expectedConnectionsListLength =
 	sizeof(struct ExpectedConnection) * WORKER_CAPACITY;
@@ -30,8 +33,6 @@ struct task_packet *tp;
 const int tp_size = sizeof(struct task_packet);
 struct cancel_task_packet *ctp;
 const int ctp_size = sizeof(struct cancel_task_packet);
-struct resume_task_worker_packet *rtwp;
-const int rtwp_size = sizeof(struct resume_task_worker_packet);
 struct promotion_packet *pp;
 const int pp_size = sizeof(struct promotion_packet);
 struct find_monitor_packet *fmp;
@@ -58,6 +59,7 @@ int main(int argc, char const *argv[]) {
 	arena = createArena(ARENA_SIZE);
 
 	taskList = amalloc(&arena, taskListLength);
+	intermediateBufferList = amalloc(&arena, intermediateBufferListLength);
 	expectedConnectionsList = amalloc(&arena, expectedConnectionsListLength);
 
 	monitor_last_shouted = amalloc(&arena, monitor_last_shouted_size);
@@ -82,7 +84,6 @@ int main(int argc, char const *argv[]) {
 	gp = amalloc(&arena, gp_size);
 	tp = amalloc(&arena, tp_size);
 	ctp = amalloc(&arena, ctp_size);
-	rtwp = amalloc(&arena, rtwp_size);
 	pp = amalloc(&arena, pp_size);
 	fmp = amalloc(&arena, fmp_size);
 	hb = amalloc(&arena, hb_size);
@@ -130,103 +131,76 @@ int main(int argc, char const *argv[]) {
 }
 
 void handle_container(struct socketDetails *sd) {
-	struct WorkerTaskDetail *wtd = (struct WorkerTaskDetail *)sd->data;
+	struct IntermediateBuffer *ib = (struct IntermediateBuffer *)sd->data;
 	if (sd->events & EPOLLOUT) {
 		printc(INFO, "worker - handle_container", "EPOLLOUT\n");
 		// ready to receive output
-		int required = iop_size - wtd->assigner_buf_ptr;
-		int sent = send(wtd->worker_fd, &wtd->assigner_buf, required, 0);
+		for (int i = 0; i < taskListLength; i++) {
+			if (taskList[i].filled == 1 && taskList[i].bottom_fd == sd->fd) {
+				struct TaskDetail *t = &taskList[i];
+				int required = iop_size - t->top_buf_ptr;
+				int sent = send(t->bottom_fd, &t->top_buf + t->top_buf_ptr,
+								required, 0);
 
-		if (sent < required) {
-			wtd->assigner_buf_ptr += max(sent, 0);
-			return;
-		}
+				if (sent < required) {
+					t->top_buf_ptr += max(sent, 0);
+					return;
+				}
 
-		wtd->assigner_buf_ptr = -1;
+				t->top_buf_ptr = 0;
+				struct IntermediateBuffer *aIb = getNodeIB(t->top_fd);
 
-		while (1) {
-			int packet_type = getPacketType(sd->fd, &wtd->assigner_buf,
-											&wtd->assigner_buf_ptr);
+				while (1) {
+					int packet_type =
+						getPacketType(t->top_fd, &aIb->buf, &aIb->buf_ptr);
 
-			if (packet_type == IO_PACKET) {
-				// copy to iop
-				int done = getPacketData(sd->fd, &wtd->assigner_buf,
-										 &wtd->assigner_buf_ptr, iop, iop_size);
+					if (packet_type == IO_PACKET) {
+						// copy to iop
+						int done = getPacketData(t->top_fd, &aIb->buf,
+												 &aIb->buf_ptr, iop, iop_size);
 
-				if (done == YES) {
-					int sent = send(wtd->worker_fd, iop, iop_size, 0);
+						if (done == YES) {
+							int sent = send(t->bottom_fd, iop, iop_size, 0);
 
-					if (sent < iop_size) {
-						wtd->assigner_buf_ptr = max(sent, 0);
-						memcpy(&wtd->assigner_buf, iop, iop_size);
+							if (sent < iop_size) {
+								memcpy(t->top_buf, aIb->buf, iop_size);
+								t->top_buf_ptr = max(sent, 0);
+								return;
+							}
+						}
+					} else if (packet_type == TASK_PACKET) {
+						// copy to tp
+						int done = getPacketData(t->top_fd, &aIb->buf,
+												 &aIb->buf_ptr, tp, tp_size);
+
+						if (done == YES) {
+							if (addToTaskList(tp->taskID, sd->fd) == NO) {
+								sendCancelTaskTCPPacket(tp->taskID, sd->fd);
+								continue;
+							}
+
+							createContainer(&taskList[tp->taskID]);
+						}
+					} else if (packet_type == ERROR) {
 						break;
 					}
 				}
-			} else if (packet_type == RESUME_TASK_PACKET) {
-				// copy to rtwp
-				int done =
-					getPacketData(sd->fd, &wtd->assigner_buf,
-								  &wtd->assigner_buf_ptr, rtwp, rtwp_size);
-
-				if (done == YES) {
-					// add this task to the task list
-					int tdId = findTask(rtwp->taskID);
-					if (tdId == -1) {
-						// task list full
-						sendCancelTaskTCPPacket(rtwp->taskID, sd->fd);
-					}
-
-					unmarkTask(rtwp->taskID);
-
-					taskList[tdId].assigner_fd = sd->fd;
-					taskList[tdId].assigner_buf_ptr = -1;
-					taskList[tdId].worker_buf_ptr = -1;
-				}
-			} else if (packet_type == CANCEL_TASK_PACKET) {
-				// copy to ctp
-				int done = getPacketData(sd->fd, &wtd->assigner_buf,
-										 &wtd->assigner_buf_ptr, ctp, ctp_size);
-
-				if (done == YES) {
-					shutdown(sd->fd, SHUT_RDWR);
-					removeFromTaskList(ctp->taskID);
-				}
-			} else if (packet_type == TASK_PACKET) {
-				// copy to tp
-				int done = getPacketData(sd->fd, &wtd->assigner_buf,
-										 &wtd->assigner_buf_ptr, tp, tp_size);
-
-				if (done == YES) {
-					struct WorkerTaskDetail *wtd =
-						addToTaskList(tp->taskID, sd->fd);
-
-					if (wtd == NULL) {
-						sendCancelTaskTCPPacket(tp->taskID, sd->fd);
-						return;
-					}
-
-					createContainer(wtd);
-				}
-			} else if (packet_type == ERROR) {
-				printc(INFO, "worker - handle_container",
-					   "EPOLLOUT - All packets over\n");
-				modifyFDInEpoll(wtd->assigner_fd,
-								EPOLL_IN | EPOLLOUT | EPOLL_DESTROY,
-								wtd->assigner_sd);
-
-				break;
 			}
 		}
+
+		printc(INFO, "worker - handle_container",
+			   "EPOLLOUT - All packets over\n");
+		modifyFDInEpoll(sd->fd, EPOLL_IN | EPOLLOUT | EPOLL_DESTROY, sd);
 	} else if (sd->events & EPOLL_DESTROY) {
 		// container destroyed
 		// send a task over packet
 		printc(INFO, "worker - handle_container", "Connected ended\n");
-		sendTaskOverPacket(wtd);
+		sendTaskOverPacket(sd->fd);
 	} else if (sd->events & EPOLLIN) {
 		// incoming data, forward to assigner
 		while (1) {
-			int required = MAX_DATA_CAPACITY - wtd->worker_buf_ptr;
-			int recved = recv(wtd->worker_fd, &wtd->worker_buf, required, 0);
+			int required = MAX_DATA_CAPACITY - ib->buf_ptr;
+			int recved = recv(sd->fd, &ib->buf + ib->buf_ptr, required, 0);
 
 			if (recved != required) {
 				break;
@@ -234,23 +208,33 @@ void handle_container(struct socketDetails *sd) {
 
 			printc(INFO, "worker - handle_container", "EPOLLIN\n");
 
+			int taskID = getContainerTaskID(sd->fd);
+
+			if (taskID == -1) {
+				// invalid container
+				printc(ERR, "worker - handle_container",
+					   "Container has no task!\n");
+				return;
+			}
+
+			struct TaskDetail *t = &taskList[taskID];
+
 			iop->packet_ID = PACKET_ID;
 			iop->packet_type = IO_PACKET;
 			iop->node_type = WORKER_NODE;
 			iop->UID = UID;
-			iop->task_ID = wtd->taskID;
-			memcpy(&iop->data, &wtd->worker_buf, 0);
+			iop->task_ID = taskID;
+			memcpy(&iop->data, &ib->buf, MAX_DATA_CAPACITY);
 
-			wtd->worker_buf_ptr = 0;
+			ib->buf_ptr = 0;
 
-			int sent = send(wtd->assigner_fd, iop, iop_size, 0);
+			int sent = send(t->top_fd, iop, iop_size, 0);
 
 			if (sent < iop_size) {
-				wtd->worker_buf_ptr += max(sent, 0);
-				memcpy(&wtd->worker_buf, iop, iop_size);
+				memcpy(&t->bottom_buf, iop, iop_size);
+				t->bottom_buf_ptr += max(sent, 0);
 
-				modifyFDInEpoll(wtd->worker_fd, EPOLL_OUT | EPOLL_DESTROY,
-								wtd->worker_sd);
+				modifyFDInEpoll(sd->fd, EPOLL_OUT | EPOLL_DESTROY, sd);
 
 				break;
 			}
@@ -293,131 +277,113 @@ void handle_role_fd(struct socketDetails *sd) {
 }
 
 void handle_assigner_fd(struct socketDetails *sd) {
-	struct WorkerTaskDetail *wtd = (struct WorkerTaskDetail *)sd->data;
+	struct IntermediateBuffer *ib = (struct IntermediateBuffer *)sd->data;
 	if (sd->events & EPOLLOUT) {
 		printc(INFO, "worker - handle_assigner_fd", "EPOLLOUT\n");
 		// ready to receive output
-		int required = iop_size - wtd->worker_buf_ptr;
-		int sent = send(wtd->assigner_fd, &wtd->worker_buf, required, 0);
+		for (int i = 0; i < taskListLength; i++) {
+			if (taskList[i].filled == 1 && taskList[i].top_fd == sd->fd) {
+				struct TaskDetail *t = &taskList[i];
+				int required = iop_size - t->bottom_buf_ptr;
+				int sent = send(t->top_fd, &t->bottom_buf + t->bottom_buf_ptr,
+								required, 0);
 
-		if (sent < required) {
-			wtd->worker_buf_ptr += max(sent, 0);
-			return;
+				if (sent < required) {
+					t->bottom_buf_ptr += max(sent, 0);
+					return;
+				}
+
+				t->bottom_buf_ptr = 0;
+
+				while (1) {
+					int required = MAX_DATA_CAPACITY - t->bottom_buf_ptr;
+					int recved =
+						recv(t->bottom_fd, &t->bottom_buf + t->bottom_buf_ptr,
+							 required, 0);
+
+					if (recved == -1) {
+						break;
+					}
+
+					// TODO the worker will not always send MAX_DATA_CAPACITY,
+					// it may send less because it is a shell
+					if (recved < required) {
+						t->bottom_buf_ptr += max(sent, 0);
+						return;
+					}
+
+					iop->packet_ID = PACKET_ID;
+					iop->packet_type = IO_PACKET;
+					iop->node_type = WORKER_NODE;
+					iop->UID = UID;
+					iop->task_ID = i;
+					memcpy(&iop->data, &t->bottom_buf, 0);
+
+					t->bottom_buf_ptr = 0;
+
+					int sent = send(t->top_fd, iop, iop_size, 0);
+
+					if (sent < iop_size) {
+						t->bottom_buf_ptr += max(sent, 0);
+						memcpy(&t->bottom_buf, iop, iop_size);
+						return;
+					}
+				}
+			}
 		}
 
-		wtd->worker_buf_ptr = -1;
-
-		while (1) {
-			int required = MAX_DATA_CAPACITY - wtd->worker_buf_ptr;
-			int recved = recv(wtd->worker_fd, &wtd->worker_buf, required, 0);
-
-			// TODO the worker will not always send MAX_DATA_CAPACITY, it may
-			// send less because it is a shell
-			if (recved < required) {
-				modifyFDInEpoll(wtd->worker_fd,
-								EPOLL_IN | EPOLLOUT | EPOLL_DESTROY,
-								wtd->worker_sd);
-				break;
-			}
-
-			iop->packet_ID = PACKET_ID;
-			iop->packet_type = IO_PACKET;
-			iop->node_type = WORKER_NODE;
-			iop->UID = UID;
-			iop->task_ID = wtd->taskID;
-			memcpy(&iop->data, &wtd->worker_buf, 0);
-
-			wtd->worker_buf_ptr = 0;
-
-			int sent = send(wtd->assigner_fd, iop, iop_size, 0);
-
-			if (sent < iop_size) {
-				wtd->worker_buf_ptr += max(sent, 0);
-				memcpy(&wtd->worker_buf, iop, iop_size);
-				break;
-			}
-		}
+		printc(INFO, "worker - handle_assigner_fd",
+			   "EPOLLOUT - All packets over\n");
+		modifyFDInEpoll(sd->fd, EPOLL_IN | EPOLLOUT | EPOLL_DESTROY, sd);
 	} else if (sd->events & EPOLL_DESTROY) {
 		// assigner lost contact...
 		// wait for buddy to send a connection
 		printc(INFO, "worker - handle_assigner_fd", "Connection dropped\n");
-		markTasks(sd->fd);
+		// kill the container
+		for (int i = 0; i < taskListLength; i++) {
+			if (taskList[i].filled == 1 && taskList[i].top_fd == sd->fd) {
+				killContainer(taskList[i].bottom_fd);
+				taskList[i].filled = 0;
+			}
+		}
 	} else if (sd->events & EPOLLIN) {
 		while (1) {
-			int packet_type = getPacketType(sd->fd, &wtd->assigner_buf,
-											&wtd->assigner_buf_ptr);
+			int packet_type = getPacketType(sd->fd, &ib->buf, &ib->buf_ptr);
 
 			if (packet_type == IO_PACKET) {
 				// copy to iop
-				int done = getPacketData(sd->fd, &wtd->assigner_buf,
-										 &wtd->assigner_buf_ptr, iop, iop_size);
+				int done = getPacketData(sd->fd, &ib->buf, &ib->buf_ptr, iop,
+										 iop_size);
 
 				if (done == YES) {
 					printc(INFO, "worker - handle_assigner_fd",
 						   "IO Packet, task: %d\n", iop->task_ID);
-					int sent = send(wtd->worker_fd, iop, iop_size, 0);
+					struct TaskDetail *t = &taskList[iop->task_ID];
+					int sent = send(t->bottom_fd, iop, iop_size, 0);
 
 					if (sent < iop_size) {
-						wtd->assigner_buf_ptr = max(sent, 0);
-						memcpy(&wtd->assigner_buf, iop, iop_size);
+						t->bottom_buf_ptr = max(sent, 0);
+						memcpy(&t->bottom_buf, iop, iop_size);
 
-						modifyFDInEpoll(wtd->assigner_fd,
-										EPOLL_DESTROY | EPOLL_OUT,
-										wtd->assigner_sd);
+						modifyFDInEpoll(sd->fd, EPOLL_DESTROY | EPOLL_OUT, sd);
 
 						break;
 					}
 				}
-			} else if (packet_type == RESUME_TASK_PACKET) {
-				// copy to rtwp
-				int done =
-					getPacketData(sd->fd, &wtd->assigner_buf,
-								  &wtd->assigner_buf_ptr, rtwp, rtwp_size);
-
-				if (done == YES) {
-					printc(INFO, "worker - handle_assigner_fd",
-						   "Resume task: %d\n", rtwp->taskID);
-					// add this task to the task list
-					int tdId = findTask(rtwp->taskID);
-					if (tdId == -1) {
-						// task list full
-						sendCancelTaskTCPPacket(rtwp->taskID, sd->fd);
-					}
-
-					unmarkTask(rtwp->taskID);
-
-					taskList[tdId].assigner_fd = sd->fd;
-					taskList[tdId].assigner_buf_ptr = -1;
-					taskList[tdId].worker_buf_ptr = -1;
-				}
-			} else if (packet_type == CANCEL_TASK_PACKET) {
-				// copy to ctp
-				int done = getPacketData(sd->fd, &wtd->assigner_buf,
-										 &wtd->assigner_buf_ptr, ctp, ctp_size);
-
-				if (done == YES) {
-					printc(INFO, "worker - handle_assigner_fd",
-						   "Cancel task: %d\n", ctp->taskID);
-					shutdown(sd->fd, SHUT_RDWR);
-					removeFromTaskList(ctp->taskID);
-				}
 			} else if (packet_type == TASK_PACKET) {
 				// copy to tp
-				int done = getPacketData(sd->fd, &wtd->assigner_buf,
-										 &wtd->assigner_buf_ptr, tp, tp_size);
+				int done =
+					getPacketData(sd->fd, &ib->buf, &ib->buf_ptr, tp, tp_size);
 
 				if (done == YES) {
 					printc(INFO, "worker - handle_assigner_fd", "Task: %d\n",
 						   tp->taskID);
-					struct WorkerTaskDetail *wtd =
-						addToTaskList(tp->taskID, sd->fd);
-
-					if (wtd == NULL) {
+					if (addToTaskList(tp->taskID, sd->fd) == NO) {
 						sendCancelTaskTCPPacket(tp->taskID, sd->fd);
-						return;
+						continue;
 					}
 
-					createContainer(wtd);
+					createContainer(&taskList[tp->taskID]);
 				}
 			} else if (packet_type == ERROR) {
 				break;
@@ -467,36 +433,18 @@ void handle_task_fd(struct socketDetails *sd) {
 				memcpy(tp, fd_buf, tp_size);
 
 				// check if the worker is full
-				struct WorkerTaskDetail *wtd =
-					addToTaskList(tp->taskID, sd->fd);
-				if (wtd == NULL) {
+				if (addToTaskList(tp->taskID, sd->fd) == NO) {
 					// send a cancel task packet
 					sendCancelTaskPacket(tp->taskID, addr);
+					continue;
 				}
 
 				// send a tcp request
-				requestTCPConnection(task_fd, addr, wtd->assigner_sd);
+				requestTCPConnection(task_fd, addr,
+									 taskList[tp->taskID].top_sd);
 
 				// create a new container
-				createContainer(wtd);
-			} else if (packet_type == RESUME_TASK_PACKET) {
-				printc(INFO, "worker - handle_task_fd", "Resume task: %d\n",
-					   rtwp->taskID);
-				// update the task
-				int tdId = findTask(rtwp->taskID);
-				if (tdId == -1) {
-					// task not found
-					sendCancelTaskPacket(rtwp->taskID, addr);
-				}
-
-				unmarkTask(rtwp->taskID);
-
-				struct WorkerTaskDetail *wtd = &taskList[tdId];
-				wtd->assigner_buf_ptr = -1;
-				wtd->worker_buf_ptr = -1;
-				wtd->assigner_fd = sd->fd;
-				// send a tcp request
-				requestTCPConnection(task_fd, addr, wtd->assigner_fd);
+				createContainer(&taskList[tp->taskID]);
 			}
 		} else if (res != 2) {
 			break;
@@ -506,22 +454,70 @@ void handle_task_fd(struct socketDetails *sd) {
 
 // -------------------- UTILS --------------------
 
-void sendTaskOverPacket(struct WorkerTaskDetail *wtd) {
-	taop->packet_ID = PACKET_ID;
-	taop->packet_type = TASK_OVER_PACKET;
-	taop->node_type = WORKER_NODE;
-	taop->UID = UID;
-	taop->taskID = wtd->taskID;
+void killContainer(int fd) {
+	struct ucred creds;
+	socklen_t ucred_len = sizeof(struct ucred);
 
-	send(wtd->assigner_fd, taop, taop_size, 0);
-	shutdown(wtd->assigner_fd, SHUT_RDWR);
-	kill(wtd->container_pid, SIGKILL);
-	wtd->filled = 0;
+	if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &creds, &ucred_len) == -1) {
+		printc(ERR, "worker - killContainer", "Could not kill container\n");
+		return;
+	}
+
+	if (kill(creds.pid, SIGKILL) != 0) {
+		printc(ERR, "worker - killContainer", "Kill call failed\n");
+		perror("kill");
+	}
 }
 
-int createContainer(struct WorkerTaskDetail *wtd) {
+int getContainerTaskID(int fd) {
+	for (int i = 0; i < taskListLength; i++) {
+		if (taskList[i].filled == 1 && taskList[i].bottom_fd == fd) {
+			return i;
+		}
+	}
+
+	return -1;
+}
+
+struct IntermediateBuffer *getNodeIB(int fd) {
+	for (int i = 0; i < intermediateBufferListLength; i++) {
+		if (intermediateBufferList[i].taken == 1 &&
+			intermediateBufferList[i].fd == fd) {
+			return &intermediateBufferList[i];
+		}
+	}
+
+	return getIB();
+}
+
+struct IntermediateBuffer *getIB() {
+	for (int i = 0; i < intermediateBufferListLength; i++) {
+		if (intermediateBufferList[i].taken == 0) {
+			return &intermediateBufferList[i];
+		}
+	}
+
+	return NULL;
+}
+
+void sendTaskOverPacket(int fd) {
+	for (int i = 0; i < taskListLength; i++) {
+		if (taskList[i].filled == 1 && taskList[i].bottom_fd == fd) {
+			taop->packet_ID = PACKET_ID;
+			taop->packet_type = TASK_OVER_PACKET;
+			taop->node_type = WORKER_NODE;
+			taop->UID = UID;
+			taop->taskID = i;
+
+			send(taskList[i].top_fd, taop, taop_size, 0);
+			taskList[i].filled = 0;
+		}
+	}
+}
+
+int createContainer(struct TaskDetail *t) {
 	printc(INFO, "worker - createContainer",
-		   "Creating container for task: %d\n", wtd->taskID);
+		   "Creating container for task: %d\n", tp->taskID);
 	int uds[2];
 
 	uid_t uid = getuid();
@@ -563,9 +559,8 @@ int createContainer(struct WorkerTaskDetail *wtd) {
 	snprintf(map_buf, sizeof(map_buf), "0 %d 1", gid);
 	writeToPath(map_buf, container_pid, "gid_map");
 
-	wtd->worker_fd = uds[0];
-	wtd->container_pid = container_pid;
-	addFDToEpoll(uds[0], EPOLL_OUT | EPOLL_DESTROY, wtd->worker_sd);
+	t->bottom_fd = uds[0];
+	addFDToEpoll(uds[0], EPOLL_OUT | EPOLL_DESTROY, t->bottom_sd);
 
 	printc(INFO, "worker - createContainer", "Container created\n");
 }
@@ -588,49 +583,8 @@ void writeToPath(char *map_buf, int pid, char *path) {
 	fclose(f);
 }
 
-/**
- * Unmarks exactly one task
- * Returns EXIT_SUCCESS if task found
- * Returns EXIT_FAILURE if task not found
- */
-int unmarkTask(int taskID) {
-	for (int i = 0; i < taskListLength; i++) {
-		if (taskList[i].filled == 1 && taskList[i].lastConnected != -1 &&
-			taskList[i].taskID == taskID) {
-			taskList[i].lastConnected = -1;
-			return EXIT_SUCCESS;
-		}
-	}
-
-	return EXIT_FAILURE;
-}
-
-/**
- * Finds the task using `taskID` in the task list
- * Returns task index if the task is found
- * Returns -1 if the task is not found
- */
-int findTask(int taskID) {
-	for (int i = 0; i < taskListLength; i++) {
-		if (taskList[i].filled == 1 && taskList[i].taskID == taskID) {
-			return i;
-		}
-	}
-
-	return -1;
-}
-
-/**
- * Marks all tasks using `fd`
- */
-void markTasks(int assigner_fd) {
-	for (int i = 0; i < taskListLength; i++) {
-		if (taskList[i].filled == 1 && taskList[i].assigner_fd == assigner_fd) {
-			taskList[i].lastConnected = getCurrTime();
-		}
-	}
-}
-
+// TODO make cleanup more robust, currently lastConnected is checked but never
+// set
 void cleanUpTasks() {
 	int currTime = getCurrTime();
 
@@ -698,14 +652,11 @@ void sendDiscoveryPacket() {
  * Returns NO if removal was not successful
  */
 int removeFromTaskList(int taskID) {
-	for (int i = 0; i < taskListLength; i++) {
-		if (taskList[i].filled == 1 && taskList[i].taskID == taskID) {
-			taskList[i].filled = 0;
-			return YES;
-		}
+	if (taskList[taskID].filled == 0) {
+		return NO;
 	}
 
-	return NO;
+	taskList[taskID].filled = 1;
 }
 
 /**
@@ -713,35 +664,36 @@ int removeFromTaskList(int taskID) {
  * Returns NO if the task was not added
  * Returns YES if the task was added
  */
-struct WorkerTaskDetail *addToTaskList(int taskID, int assigner_fd) {
-	for (int i = 0; i < taskListLength; i++) {
-		if (taskList[i].filled == 0) {
-			taskList[i].filled = 1;
-			taskList[i].index = i;
-			taskList[i].taskID = taskID;
-			taskList[i].lastConnected = getCurrTime();
-			taskList[i].container_pid = -1;
-			taskList[i].assigner_fd = assigner_fd;
-			taskList[i].worker_fd = -1;
-			struct socketDetails *assigner_sd =
-				amalloc(&arena, sizeof(struct socketDetails));
-			assigner_sd->handler = handle_assigner_fd;
-			assigner_sd->data = &taskList[i];
-			assigner_sd->fd = assigner_fd;
-			taskList[i].assigner_sd = assigner_sd;
-			struct socketDetails *worker_sd =
-				amalloc(&arena, sizeof(struct socketDetails));
-			worker_sd->handler = handle_container;
-			worker_sd->data = &taskList[i];
-			worker_sd->fd = -1;
-			taskList[i].worker_sd = worker_sd;
-			taskList[i].assigner_buf_ptr = -1;
-			taskList[i].worker_buf_ptr = -1;
-			return &taskList[i];
-		}
+int addToTaskList(int taskID, int assigner_fd) {
+	if (taskList[taskID].filled == 1) {
+		return NO;
 	}
 
-	return NULL;
+	taskList[taskID].filled = 1;
+	taskList[taskID].lastConnected = getCurrTime();
+	taskList[taskID].top_buf_ptr = 0;
+	taskList[taskID].bottom_buf_ptr = 0;
+	taskList[taskID].top_fd = -1;
+	taskList[taskID].bottom_fd = -1;
+
+	if (taskList[taskID].bottom_sd == NULL) {
+		taskList[taskID].bottom_sd =
+			amalloc(&arena, sizeof(struct socketDetails));
+	}
+	taskList[taskID].bottom_sd->fd = taskList[taskID].bottom_fd;
+	taskList[taskID].bottom_sd->data = getNodeIB(taskList[taskID].bottom_fd);
+	taskList[taskID].bottom_sd->handler = handle_container;
+	taskList[taskID].bottom_sd->events = 0;
+
+	if (taskList[taskID].top_sd == NULL) {
+		taskList[taskID].top_sd = amalloc(&arena, sizeof(struct socketDetails));
+	}
+	taskList[taskID].top_sd->fd = taskList[taskID].bottom_fd;
+	taskList[taskID].top_sd->data = getNodeIB(taskList[taskID].bottom_fd);
+	taskList[taskID].top_sd->handler = handle_container;
+	taskList[taskID].top_sd->events = 0;
+
+	return YES;
 }
 
 /**

@@ -25,9 +25,6 @@ enum Packets {
 	IO_PACKET,
 	MONITOR_HEARTBEAT_PACKET,
 	HEARTBEAT_PACKET,
-	BUDDY_HEARTBEAT_PACKET,
-	BE_BUDDY_PACKET,
-	RESUME_TASK_PACKET,
 	CANCEL_TASK_PACKET,
 	TASK_OVER_PACKET,
 	PROMOTE_PACKET,
@@ -50,7 +47,7 @@ enum NodeTypes {
 #define ERROR -4
 
 #define PACKET_ID 0xCAF1 // CAF1 = CAP = Code Arena Project :)
-#define LARGEST_PACKET sizeof(struct buddy_heartbeat_packet)
+#define LARGEST_PACKET sizeof(struct io_packet)
 #define MAX_UID 10000
 
 #define HEARTBEAT_INTERVAL 10 // in milliseconds
@@ -100,9 +97,6 @@ const int DEMOTE_MONITOR_THRESHOLD = ((MONITOR_CAPACITY * 40) / 100);
 #define TASK_PORT "8001" // handles everything with task, tcp and udp sockets
 #define FIND_PORT                                                              \
 	"8002" // for getting assigner and buddy addresses from monitor
-#define BUDDY_PORT                                                             \
-	"8002" // for talking to buddy, tcp and udp sockets - intentionally same as
-		   // above
 #define HEARTBEAT_PORT "8003" // for heartbeats simply
 #define ROLE_PORT "8004"	  // for promote/demote packets
 
@@ -132,38 +126,22 @@ struct RetryPacket {
 
 struct TaskDetail {
 	int filled;
-	int taskID;
-	int fd;
-	int isBuddyTask;
-	struct sockaddr_in
-		addr; // worker addr for assigner and assigner addr for gateway
-	struct socketDetails
-		*sd;		   // worker sd for assigner and assigner sd for gateway
-	int lastConnected; // only for a worker
-};
-
-struct WorkerTaskDetail {
-	int filled;
-	int index;
-	int taskID;
 	int lastConnected;
-	pid_t container_pid;
-	int assigner_fd;
-	int worker_fd;
-	struct socketDetails *assigner_sd;
-	struct socketDetails *worker_sd;
-	uint8_t worker_buf[sizeof(struct io_packet)];
-	int worker_buf_ptr;
-	uint8_t assigner_buf[sizeof(struct io_packet)];
-	int assigner_buf_ptr;
+	int top_fd;
+	int bottom_fd;
+	struct socketDetails *top_sd;
+	struct socketDetails *bottom_sd;
+	uint8_t bottom_buf[sizeof(struct io_packet)];
+	int bottom_buf_ptr;
+	uint8_t top_buf[sizeof(struct io_packet)];
+	int top_buf_ptr;
 };
 
-struct TcpSocket {
-	int filled;
-	int sock;
-	int UID;
-	int connections;
-	struct sockaddr_in adrr;
+struct IntermediateBuffer {
+	int taken;
+	int fd;
+	uint8_t buf[sizeof(struct io_packet)];
+	int buf_ptr;
 };
 
 struct NodeDetail {
@@ -209,8 +187,6 @@ struct task_packet {
 	int node_type;
 	int UID;
 	int taskID;
-	struct sockaddr_in worker_addr;
-	struct sockaddr_in gateway_addr;
 };
 
 struct find_node_packet {
@@ -219,7 +195,6 @@ struct find_node_packet {
 	int node_type;
 	int UID;
 	int was_redirected;
-	int target_node_type;
 };
 
 struct found_node_packet {
@@ -252,7 +227,6 @@ struct monitor_heartbeat_packet {
 	int assigners;
 	int gateways;
 	int totalNodes;
-	int has_assigner_without_buddy;
 };
 
 struct heartbeat_packet {
@@ -261,41 +235,6 @@ struct heartbeat_packet {
 	int node_type;
 	int UID;
 	int load;
-	int has_buddy; // relevant only for an assigner
-};
-
-struct buddy_heartbeat_packet {
-	int packet_ID;
-	int packet_type;
-	int node_type;
-	int UID;
-	struct sockaddr_in gatewayAddr;
-	struct TaskDetail taskDetails[ASSIGNER_CAPACITY];
-};
-
-struct be_buddy_packet {
-	int packet_ID;
-	int packet_type;
-	int node_type;
-	int UID;
-	int will_be_buddy;
-};
-
-struct resume_task_gateway_packet {
-	int packet_ID;
-	int packet_type;
-	int node_type;
-	int UID;
-	int tasks;
-	int taskIDs[ASSIGNER_CAPACITY];
-};
-
-struct resume_task_worker_packet {
-	int packet_ID;
-	int packet_type;
-	int node_type;
-	int UID;
-	int taskID;
 };
 
 struct cancel_task_packet {
@@ -317,8 +256,8 @@ struct task_over_packet {
 struct demotion_packet {
 	int packet_ID;
 	int packet_type;
-	int UID;
 	int node_type;
+	int UID;
 	int demoted_node_type;
 	int nodes_to_demote;
 };
@@ -326,8 +265,8 @@ struct demotion_packet {
 struct promotion_packet {
 	int packet_ID;
 	int packet_type;
-	int UID;
 	int node_type;
+	int UID;
 	int promoted_node_type;
 	int target_node_type;
 };
