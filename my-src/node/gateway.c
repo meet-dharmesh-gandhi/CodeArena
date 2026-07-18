@@ -49,7 +49,7 @@ const int addrLen = sizeof(struct sockaddr_in);
 
 int monitor_last_shouted;
 
-int find_fd, timer_fd, task_fd, hb_fd, accept_assigner_fd;
+int discover_fd, find_fd, timer_fd, task_fd, hb_fd, accept_assigner_fd;
 
 uint8_t *buf;
 const int buf_size = LARGEST_PACKET;
@@ -64,6 +64,8 @@ struct io_packet *iop;
 const iop_size = sizeof(struct io_packet);
 struct heartbeat_packet *hp;
 const hp_size = sizeof(struct heartbeat_packet);
+struct find_monitor_packet *fmp;
+const fmp_size = sizeof(struct find_monitor_packet);
 
 napi_value Init(napi_env env, napi_value exports) {
 	if (garp() == NO) {
@@ -91,8 +93,11 @@ napi_value Init(napi_env env, napi_value exports) {
 	set_broadcast_addr(DISCOVER_PORT, broadcastAddr);
 	addr = malloc(addrLen);
 
+	monitor_last_shouted = -1; // indicates the monitor was never found
+
 	buf = malloc(buf_size);
 
+	discover_fd = getNewSocket(DISCOVER_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
 	find_fd = getNewSocket(FIND_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
 	task_fd = getNewSocket(TASK_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
 	hb_fd = getNewSocket(HEARTBEAT_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
@@ -102,6 +107,7 @@ napi_value Init(napi_env env, napi_value exports) {
 	timer_fd = getNewTimerFD(CLOCK_MONOTONIC, HEARTBEAT_INTERVAL,
 							 HEARTBEAT_INTERVAL, 1);
 
+	setNonBlocking(discover_fd);
 	setNonBlocking(find_fd);
 	setNonBlocking(task_fd);
 	setNonBlocking(hb_fd);
@@ -111,6 +117,7 @@ napi_value Init(napi_env env, napi_value exports) {
 	fonp = malloc(fonp_size);
 	tp = malloc(tp_size);
 	iop = malloc(iop_size);
+	fmp = malloc(fmp_size);
 
 	uv_loop_t *node_loop = getUVLoop(env);
 	uv_loop_t *handle;
@@ -237,6 +244,12 @@ napi_value handle_timer_fd(uv_poll_t *handle, int status, int events) {
 
 	// remove tasks waiting too long
 	removeDeadTasks();
+
+	// check if the monitor has been in contact
+	checkMonitor();
+
+	// send discovery packets when first waking up
+	sendDiscoveryPacket();
 }
 
 napi_value handle_hb_fd_close(uv_poll_t *handle) {}
@@ -250,11 +263,10 @@ napi_value handle_hb_fd(uv_poll_t *handle, int status, int events) {
 				printc(RED, "Gateway - handle_hb_fd", "Existing monitor\n");
 				monitor_last_shouted = getCurrTime();
 			} else if (getCurrTime() - monitor_last_shouted > EXPIRE_PERIOD) {
-				printc(RED, "Gateway - handle_hb_fd", "New monitor\n");
-				monitorAddr = addr;
-				monitor_last_shouted = getCurrTime();
-				// TODO this gateway is dead for the monitor, just become an
-				// empty node
+				// this is impossible to happen since a discovery packet is
+				// never sent after a monitor starts sending heartbeats
+				printc(IMP, "gateway - handle_hb_fd",
+					   "New monitor heartbeat received?!\n");
 			}
 		} else if (res != 2) {
 			break;
@@ -637,6 +649,17 @@ napi_value CreateTask(napi_env env, napi_callback_info info) {
 
 // -------------------- UTILS --------------------
 
+void sendDiscoveryPacket() {
+	if (monitor_last_shouted > 0) {
+		return;
+	}
+
+	fmp->packet_ID = PACKET_ID;
+	fmp->packet_type = FIND_MONITOR_PACKET;
+
+	sendto(discover_fd, fmp, fmp_size, 0, broadcastAddr, addrLen);
+}
+
 struct Task *addTask(napi_env env, napi_value cb, napi_value close_cb,
 					 napi_value message_cb) {
 	for (int i = 0; i < taskListLength; i++) {
@@ -654,6 +677,15 @@ struct Task *addTask(napi_env env, napi_value cb, napi_value close_cb,
 			taskList[i].message_cb = message_cb;
 			return &taskList[i];
 		}
+	}
+}
+
+void checkMonitor() {
+	if (getCurrTime() - monitor_last_shouted > EXPIRE_PERIOD) {
+		printc(
+			ERR, "gateway - checkMonitor",
+			"Becoming an empty node, monitor did not reply for a long time\n");
+		morph(EMPTY_NODE);
 	}
 }
 
