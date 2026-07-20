@@ -172,6 +172,8 @@ void handle_container(struct socketDetails *sd) {
 									   sizeof(int));
 								return;
 							}
+						} else if (done == ERROR || done == UNKNOWN) {
+							break;
 						}
 					} else if (packet_type == TASK_PACKET) {
 						// copy to tp
@@ -185,6 +187,8 @@ void handle_container(struct socketDetails *sd) {
 							}
 
 							createContainer(&taskList[tp->taskID]);
+						} else if (done == ERROR || done == UNKNOWN) {
+							break;
 						}
 					} else if (packet_type == ERROR) {
 						break;
@@ -407,6 +411,8 @@ void handle_assigner_fd(struct socketDetails *sd) {
 
 						break;
 					}
+				} else if (done == ERROR || done == UNKNOWN) {
+					break;
 				}
 			} else if (packet_type == TASK_PACKET) {
 				// copy to tp
@@ -422,6 +428,8 @@ void handle_assigner_fd(struct socketDetails *sd) {
 					}
 
 					createContainer(&taskList[tp->taskID]);
+				} else if (done == ERROR || done == UNKNOWN) {
+					break;
 				}
 			} else if (packet_type == ERROR) {
 				break;

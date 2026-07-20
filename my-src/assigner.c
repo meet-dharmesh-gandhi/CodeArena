@@ -304,6 +304,8 @@ void handle_gateway_fd(struct socketDetails *sd) {
 
 									return;
 								}
+							} else if (done == ERROR || done == UNKNOWN) {
+								break;
 							}
 						} else if (packet_type == TASK_OVER_PACKET) {
 							// copy to top
@@ -317,6 +319,8 @@ void handle_gateway_fd(struct socketDetails *sd) {
 								sendTaskOverPacket(taskList[top->taskID].top_fd,
 												   top->taskID);
 								wIb->taken = 0;
+							} else if (done == ERROR || done == UNKNOWN) {
+								break;
 							}
 						} else if (packet_type == CANCEL_TASK_PACKET) {
 							// copy to ctp
@@ -330,6 +334,8 @@ void handle_gateway_fd(struct socketDetails *sd) {
 								sendCancelTaskPacket(
 									taskList[ctp->taskID].top_fd, ctp->taskID);
 								wIb->taken = 0;
+							} else if (done == ERROR || done == UNKNOWN) {
+								break;
 							}
 						} else if (packet_type == ERROR) {
 							break;
@@ -384,6 +390,8 @@ void handle_gateway_fd(struct socketDetails *sd) {
 						modifyFDInEpoll(sd->fd, EPOLL_OUT | EPOLL_DESTROY, sd);
 						break;
 					}
+				} else if (done == ERROR || done == UNKNOWN) {
+					break;
 				}
 			} else if (packet_type == TASK_OVER_PACKET) {
 				// copy to top
@@ -397,6 +405,8 @@ void handle_gateway_fd(struct socketDetails *sd) {
 					removeTask(top->taskID);
 					shutdown(taskList[top->taskID].bottom_fd, SHUT_RDWR);
 					ib->taken = 0;
+				} else if (done == ERROR || done == UNKNOWN) {
+					break;
 				}
 			} else if (packet_type == TASK_PACKET) {
 				// copy to tp
@@ -407,6 +417,8 @@ void handle_gateway_fd(struct socketDetails *sd) {
 					printc(INFO, "assigner - handle_gateway_fd",
 						   "new task via UDP %d\n", tp->taskID);
 					processTaskPacket();
+				} else if (done == ERROR || done == UNKNOWN) {
+					break;
 				}
 			} else if (packet_type == ERROR) {
 				break;
@@ -468,6 +480,8 @@ void handle_worker_fd(struct socketDetails *sd) {
 
 									return;
 								}
+							} else if (done == ERROR || done == UNKNOWN) {
+								break;
 							}
 						} else if (packet_type == TASK_OVER_PACKET) {
 							// copy to top
@@ -480,6 +494,8 @@ void handle_worker_fd(struct socketDetails *sd) {
 								deleteFDInEpoll(sd->fd);
 								removeTask(top->taskID);
 								ib->taken = 0;
+							} else if (done == ERROR || done == UNKNOWN) {
+								break;
 							}
 						} else if (packet_type == TASK_PACKET) {
 							// copy to tp
@@ -490,6 +506,8 @@ void handle_worker_fd(struct socketDetails *sd) {
 								printc(INFO, "assigner - handle_gateway_fd",
 									   "new task via UDP %d\n", tp->taskID);
 								processTaskPacket();
+							} else if (done == ERROR || done == UNKNOWN) {
+								break;
 							}
 						} else if (packet_type == ERROR) {
 							break;
@@ -539,6 +557,8 @@ void handle_worker_fd(struct socketDetails *sd) {
 
 						break;
 					}
+				} else if (done == ERROR || done == UNKNOWN) {
+					break;
 				}
 			} else if (packet_type == TASK_OVER_PACKET) {
 				// copy to top
@@ -552,6 +572,8 @@ void handle_worker_fd(struct socketDetails *sd) {
 					sendTaskOverPacket(taskList[top->taskID].top_fd,
 									   top->taskID);
 					ib->taken = 0;
+				} else if (done == ERROR || done == UNKNOWN) {
+					break;
 				}
 			} else if (packet_type == CANCEL_TASK_PACKET) {
 				// copy to ctp
@@ -565,6 +587,8 @@ void handle_worker_fd(struct socketDetails *sd) {
 					sendTaskOverPacket(taskList[ctp->taskID].top_fd,
 									   ctp->taskID);
 					ib->taken = 0;
+				} else if (done == ERROR || done == UNKNOWN) {
+					break;
 				}
 			} else if (packet_type == ERROR || packet_type == UNKNOWN) {
 				break;
