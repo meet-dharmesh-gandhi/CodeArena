@@ -262,7 +262,7 @@ void handle_gateway_fd(struct socketDetails *sd) {
 						   "Sending data of task %d to gateway\n", i);
 
 					struct TaskDetail *t = &taskList[i];
-					int required = iop_size - t->bottom_buf_ptr;
+					int required = t->bottom_filled - t->bottom_buf_ptr;
 					int sent = send(sd->fd, t->bottom_buf + t->bottom_buf_ptr,
 									required, 0);
 
@@ -281,22 +281,26 @@ void handle_gateway_fd(struct socketDetails *sd) {
 
 						if (packet_type == IO_PACKET) {
 							// copy to iop
-							int done = getPacketData(
-								sd->fd, wIb->buf, &wIb->buf_ptr, iop, iop_size);
+							int done =
+								getIOPacketData(sd->fd, wIb->buf, &wIb->buf_ptr,
+												iop, wIb->filled);
 
 							if (done == YES) {
 								printc(INFO, "assigner - handle_worker_fd",
 									   "Got IO packet, task: %d\n",
 									   iop->task_ID);
 								// now forward this data to the gateway
-								int sent = send(gateway_fd, iop, iop_size, 0);
+								int sent =
+									send(gateway_fd, iop, wIb->filled, 0);
 
-								if (sent < iop_size) {
+								if (sent < wIb->filled) {
 									struct TaskDetail *t =
 										&taskList[iop->task_ID];
 									// copy to bottom_buf
-									memcpy(t->bottom_buf, iop, iop_size);
+									memcpy(t->bottom_buf, iop, wIb->filled);
 									t->bottom_buf_ptr = max(sent, 0);
+									memcpy(&t->bottom_filled, &wIb->filled,
+										   sizeof(int));
 
 									return;
 								}
@@ -352,9 +356,11 @@ void handle_gateway_fd(struct socketDetails *sd) {
 
 			if (packet_type == IO_PACKET) {
 				// packet - iop
-				int done =
-					getPacketData(sd->fd, &ib->buf, &ib->buf_ptr, iop, addrLen);
+				int done = getIOPacketData(sd->fd, &ib->buf, &ib->buf_ptr, iop,
+										   &ib->filled);
 
+				// TODO break when done has a value of ERROR and
+				// print the error when done has a value of UNKNOWN
 				if (done == YES) {
 					printc(INFO, "assigner - handle_gateway_fd",
 						   "Got IO packet, task %d\n", iop->task_ID);
@@ -366,12 +372,13 @@ void handle_gateway_fd(struct socketDetails *sd) {
 						continue;
 					}
 
-					int sent = send(t->bottom_fd, iop, iop_size, 0);
+					int sent = send(t->bottom_fd, iop, ib->filled, 0);
 
-					if (sent < iop_size) {
+					if (sent < ib->filled) {
 						// copy iop into top_buf
-						memcpy(t->top_buf, iop, iop_size);
+						memcpy(t->top_buf, iop, ib->filled);
 						t->top_buf_ptr = max(sent, 0);
+						memcpy(&t->top_filled, &ib->filled, sizeof(int));
 
 						// remove EPOLLIN from this socket
 						modifyFDInEpoll(sd->fd, EPOLL_OUT | EPOLL_DESTROY, sd);
@@ -418,7 +425,7 @@ void handle_worker_fd(struct socketDetails *sd) {
 				if (ib->buf_ptr != -1) {
 					printc(INFO, "assigner - handle_worker_fd",
 						   "Data going from worker to gateway\n");
-					int required = ib->buf_ptr + iop_size;
+					int required = ib->filled - ib->buf_ptr;
 					int sent =
 						send(gateway_fd, ib->buf + ib->buf_ptr, required, 0);
 
@@ -432,33 +439,32 @@ void handle_worker_fd(struct socketDetails *sd) {
 					// some input from the gateway, pass it to the worker
 					struct IntermediateBuffer *gIb =
 						getNodeIB(taskList[i].top_fd);
+					struct TaskDetail *t = &taskList[i];
 					while (1) {
 						int packet_type =
 							getPacketType(sd->fd, &gIb->buf, &gIb->buf_ptr);
 
 						if (packet_type == IO_PACKET) {
 							// packet - iop
-							int done = getPacketData(
-								sd->fd, &gIb->buf, &gIb->buf_ptr, iop, addrLen);
+							int done =
+								getPacketData(sd->fd, &gIb->buf, &gIb->buf_ptr,
+											  iop, &gIb->filled);
 
 							if (done == YES) {
 								printc(INFO, "assigner - handle_gateway_fd",
 									   "Got IO packet, task %d\n",
 									   iop->task_ID);
 								// packet is formed
-								// check if the task is there
-								struct TaskDetail *t = &taskList[iop->task_ID];
-								if (t->filled == 0) {
-									// invalid taskID, ignore
-									continue;
-								}
 
-								int sent = send(t->bottom_fd, iop, iop_size, 0);
+								int sent =
+									send(t->bottom_fd, iop, gIb->filled, 0);
 
-								if (sent < iop_size) {
+								if (sent < gIb->filled) {
 									// copy iop into top_buf
-									memcpy(t->top_buf, iop, iop_size);
+									memcpy(t->top_buf, iop, gIb->filled);
 									t->top_buf_ptr = max(sent, 0);
+									memcpy(&t->top_filled, &gIb->filled,
+										   sizeof(int));
 
 									return;
 								}
@@ -512,20 +518,21 @@ void handle_worker_fd(struct socketDetails *sd) {
 
 			if (packet_type == IO_PACKET) {
 				// copy to iop
-				int done =
-					getPacketData(sd->fd, ib->buf, &ib->buf_ptr, iop, iop_size);
+				int done = getIOPacketData(sd->fd, ib->buf, &ib->buf_ptr, iop,
+										   &ib->filled);
 
 				if (done == YES) {
 					printc(INFO, "assigner - handle_worker_fd",
 						   "Got IO packet, task: %d\n", iop->task_ID);
 					// now forward this data to the gateway
-					int sent = send(gateway_fd, iop, iop_size, 0);
+					int sent = send(gateway_fd, iop, ib->filled, 0);
 
-					if (sent < iop_size) {
+					if (sent < ib->filled) {
 						struct TaskDetail *t = &taskList[iop->task_ID];
 						// copy to bottom_buf
-						memcpy(t->bottom_buf, iop, iop_size);
+						memcpy(t->bottom_buf, iop, ib->filled);
 						t->bottom_buf_ptr = max(sent, 0);
+						memcpy(t->bottom_filled, ib->filled, sizeof(int));
 
 						// remove EPOLLIN from this socket
 						modifyFDInEpoll(sd->fd, EPOLL_OUT | EPOLL_DESTROY, sd);

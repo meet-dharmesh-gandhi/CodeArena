@@ -87,6 +87,8 @@ int main(int argc, char const *argv[]) {
 	pp = amalloc(&arena, pp_size);
 	fmp = amalloc(&arena, fmp_size);
 	hb = amalloc(&arena, hb_size);
+	iop = amalloc(&arena, iop_size);
+	taop = amalloc(&arena, taop_size);
 
 	task_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
 	task_fd_sd->fd = task_fd;
@@ -138,7 +140,7 @@ void handle_container(struct socketDetails *sd) {
 		for (int i = 0; i < taskListLength; i++) {
 			if (taskList[i].filled == 1 && taskList[i].bottom_fd == sd->fd) {
 				struct TaskDetail *t = &taskList[i];
-				int required = iop_size - t->top_buf_ptr;
+				int required = t->top_filled - t->top_buf_ptr;
 				int sent = send(t->bottom_fd, &t->top_buf + t->top_buf_ptr,
 								required, 0);
 
@@ -156,15 +158,18 @@ void handle_container(struct socketDetails *sd) {
 
 					if (packet_type == IO_PACKET) {
 						// copy to iop
-						int done = getPacketData(t->top_fd, &aIb->buf,
-												 &aIb->buf_ptr, iop, iop_size);
+						int done =
+							getIOPacketData(t->top_fd, &aIb->buf, &aIb->buf_ptr,
+											iop, &aIb->filled);
 
 						if (done == YES) {
-							int sent = send(t->bottom_fd, iop, iop_size, 0);
+							int sent = send(t->bottom_fd, iop, &aIb->filled, 0);
 
-							if (sent < iop_size) {
-								memcpy(t->top_buf, aIb->buf, iop_size);
+							if (sent < aIb->filled) {
+								memcpy(t->top_buf, aIb->buf, aIb->filled);
 								t->top_buf_ptr = max(sent, 0);
+								memcpy(&t->top_filled, &aIb->filled,
+									   sizeof(int));
 								return;
 							}
 						}
@@ -199,14 +204,26 @@ void handle_container(struct socketDetails *sd) {
 	} else if (sd->events & EPOLLIN) {
 		// incoming data, forward to assigner
 		while (1) {
-			int required = MAX_DATA_CAPACITY - ib->buf_ptr;
-			int recved = recv(sd->fd, &ib->buf + ib->buf_ptr, required, 0);
-
-			if (recved != required) {
-				break;
-			}
-
 			printc(INFO, "worker - handle_container", "EPOLLIN\n");
+			int bufFull = 0;
+			while (1) {
+				int required = MAX_DATA_CAPACITY - ib->buf_ptr;
+				if (required == 0) {
+					bufFull = 1;
+					break;
+				}
+
+				int recved = recv(sd->fd, &ib->buf + ib->buf_ptr, required, 0);
+
+				if (recved == -1 && (errno == EWOULDBLOCK || errno == EAGAIN)) {
+					break;
+				} else {
+					printc(RED, "worker - handle_container",
+						   "Socket unknown error\n");
+					perror("UDS");
+					break;
+				}
+			}
 
 			int taskID = getContainerTaskID(sd->fd);
 
@@ -217,6 +234,7 @@ void handle_container(struct socketDetails *sd) {
 				return;
 			}
 
+			ib->filled = ib->buf_ptr;
 			struct TaskDetail *t = &taskList[taskID];
 
 			iop->packet_ID = PACKET_ID;
@@ -224,18 +242,21 @@ void handle_container(struct socketDetails *sd) {
 			iop->node_type = WORKER_NODE;
 			iop->UID = UID;
 			iop->task_ID = taskID;
-			memcpy(&iop->data, &ib->buf, MAX_DATA_CAPACITY);
+			memcpy(&iop->data, &ib->buf, ib->filled);
 
 			ib->buf_ptr = 0;
 
-			int sent = send(t->top_fd, iop, iop_size, 0);
+			int sent = send(t->top_fd, iop, ib->filled, 0);
 
-			if (sent < iop_size) {
-				memcpy(&t->bottom_buf, iop, iop_size);
+			if (sent < ib->filled) {
+				memcpy(&t->bottom_buf, iop, ib->filled);
 				t->bottom_buf_ptr += max(sent, 0);
+				t->bottom_filled = ib->filled;
 
 				modifyFDInEpoll(sd->fd, EPOLL_OUT | EPOLL_DESTROY, sd);
+			}
 
+			if (bufFull == 0) {
 				break;
 			}
 		}
@@ -284,7 +305,7 @@ void handle_assigner_fd(struct socketDetails *sd) {
 		for (int i = 0; i < taskListLength; i++) {
 			if (taskList[i].filled == 1 && taskList[i].top_fd == sd->fd) {
 				struct TaskDetail *t = &taskList[i];
-				int required = iop_size - t->bottom_buf_ptr;
+				int required = t->bottom_filled - t->bottom_buf_ptr;
 				int sent = send(t->top_fd, &t->bottom_buf + t->bottom_buf_ptr,
 								required, 0);
 
@@ -295,38 +316,54 @@ void handle_assigner_fd(struct socketDetails *sd) {
 
 				t->bottom_buf_ptr = 0;
 
+				struct IntermediateBuffer *wIb = getNodeIB(t->bottom_fd);
 				while (1) {
-					int required = MAX_DATA_CAPACITY - t->bottom_buf_ptr;
-					int recved =
-						recv(t->bottom_fd, &t->bottom_buf + t->bottom_buf_ptr,
-							 required, 0);
+					printc(INFO, "worker - handle_assigner", "EPOLLIN\n");
+					int bufFull = 0;
+					while (1) {
+						int required = MAX_DATA_CAPACITY - wIb->buf_ptr;
+						if (required == 0) {
+							bufFull = 1;
+							break;
+						}
 
-					if (recved == -1) {
-						break;
+						int recved =
+							recv(t->bottom_fd, &wIb->buf + wIb->buf_ptr,
+								 required, 0);
+
+						if (recved == -1 &&
+							(errno == EWOULDBLOCK || errno == EAGAIN)) {
+							break;
+						} else {
+							printc(RED, "worker - handle_assigner",
+								   "Socket unknown error\n");
+							perror("UDS");
+							break;
+						}
 					}
 
-					// TODO the worker will not always send MAX_DATA_CAPACITY,
-					// it may send less because it is a shell
-					if (recved < required) {
-						t->bottom_buf_ptr += max(sent, 0);
-						return;
-					}
+					wIb->filled = wIb->buf_ptr;
 
 					iop->packet_ID = PACKET_ID;
 					iop->packet_type = IO_PACKET;
 					iop->node_type = WORKER_NODE;
 					iop->UID = UID;
 					iop->task_ID = i;
-					memcpy(&iop->data, &t->bottom_buf, 0);
+					memcpy(&iop->data, &wIb->buf, wIb->filled);
 
-					t->bottom_buf_ptr = 0;
+					wIb->buf_ptr = 0;
 
-					int sent = send(t->top_fd, iop, iop_size, 0);
+					int sent = send(t->top_fd, iop, wIb->filled, 0);
 
-					if (sent < iop_size) {
+					if (sent < wIb->filled) {
 						t->bottom_buf_ptr += max(sent, 0);
-						memcpy(&t->bottom_buf, iop, iop_size);
+						memcpy(&t->bottom_buf, iop, wIb->filled);
+						t->bottom_filled = wIb->filled;
 						return;
+					}
+
+					if (bufFull == 0) {
+						break;
 					}
 				}
 			}
@@ -352,18 +389,19 @@ void handle_assigner_fd(struct socketDetails *sd) {
 
 			if (packet_type == IO_PACKET) {
 				// copy to iop
-				int done = getPacketData(sd->fd, &ib->buf, &ib->buf_ptr, iop,
-										 iop_size);
+				int done = getIOPacketData(sd->fd, &ib->buf, &ib->buf_ptr, iop,
+										   ib->filled);
 
 				if (done == YES) {
 					printc(INFO, "worker - handle_assigner_fd",
 						   "IO Packet, task: %d\n", iop->task_ID);
 					struct TaskDetail *t = &taskList[iop->task_ID];
-					int sent = send(t->bottom_fd, iop, iop_size, 0);
+					int sent = send(t->bottom_fd, iop, ib->filled, 0);
 
-					if (sent < iop_size) {
+					if (sent < ib->filled) {
 						t->bottom_buf_ptr = max(sent, 0);
-						memcpy(&t->bottom_buf, iop, iop_size);
+						memcpy(&t->bottom_buf, iop, ib->filled);
+						t->bottom_filled = ib->filled;
 
 						modifyFDInEpoll(sd->fd, EPOLL_DESTROY | EPOLL_OUT, sd);
 

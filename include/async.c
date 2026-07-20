@@ -179,7 +179,7 @@ int getPacketType(int fd, uint8_t *fd_buf, int *fd_buf_ptr) {
  */
 int getPacketData(int fd, uint8_t *fd_buf, int *fd_buf_ptr, uint8_t *packet,
 				  int packet_len) {
-	if (*fd_buf_ptr < 8) {
+	if (*fd_buf_ptr < 2 * sizeof(int)) {
 		return UNKNOWN;
 	}
 
@@ -202,6 +202,49 @@ int getPacketData(int fd, uint8_t *fd_buf, int *fd_buf_ptr, uint8_t *packet,
 	}
 
 	return NO;
+}
+
+int getIOPacketData(int fd, uint8_t *fd_buf, int *fd_buf_ptr, uint8_t *packet,
+					int *filled) {
+	if (*fd_buf_ptr < 2 * sizeof(int)) {
+		return UNKNOWN;
+	}
+
+	// data_size is the 6th property in io packet
+	int first_half = 6 * sizeof(int);
+	if (*fd_buf_ptr < first_half) {
+		int recved =
+			recv(fd, fd_buf + *fd_buf_ptr, first_half - *fd_buf_ptr, 0);
+		if (recved == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+			return ERROR;
+		} else if (recved == -1) {
+			return UNKNOWN;
+		}
+		*fd_buf_ptr += recved;
+		if (recved < first_half - *fd_buf_ptr) {
+			return NO;
+		}
+		memcpy(filled, fd_buf + (5 * sizeof(int)), sizeof(int));
+		*filled += first_half;
+	}
+
+	int required = *filled - *fd_buf_ptr;
+	int recved = recv(fd, fd_buf + *fd_buf_ptr, required, 0);
+
+	if (recved == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+		return ERROR;
+	} else if (recved == -1) {
+		return UNKNOWN;
+	}
+
+	if (recved < required) {
+		fd_buf_ptr += max(recved, 0);
+		return NO;
+	}
+
+	memcpy(packet, fd_buf, *filled);
+	*fd_buf_ptr = 0;
+	return YES;
 }
 
 int sendPacket(uint8_t *packet_buf, int *packet_buf_ptr, int packet_size) {}

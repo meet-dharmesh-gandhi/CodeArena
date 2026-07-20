@@ -24,4 +24,7 @@ extern int getPacketType(int fd, uint8_t *fd_buf, int *fd_buf_ptr);
 extern int getPacketData(int fd, uint8_t *fd_buf, int *fd_buf_ptr,
 						 uint8_t *packet, int packet_len);
 
+extern int getIOPacketData(int fd, uint8_t *fd_buf, int *fd_buf_ptr,
+						   uint8_t *packet, int *filled);
+
 #endif

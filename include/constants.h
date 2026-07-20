@@ -133,8 +133,10 @@ struct TaskDetail {
 	struct socketDetails *bottom_sd;
 	uint8_t bottom_buf[sizeof(struct io_packet)];
 	int bottom_buf_ptr;
+	int bottom_filled;
 	uint8_t top_buf[sizeof(struct io_packet)];
 	int top_buf_ptr;
+	int top_filled;
 };
 
 struct IntermediateBuffer {
@@ -142,6 +144,7 @@ struct IntermediateBuffer {
 	int fd;
 	uint8_t buf[sizeof(struct io_packet)];
 	int buf_ptr;
+	int filled;
 };
 
 struct NodeDetail {
@@ -212,6 +215,7 @@ struct io_packet {
 	int node_type;
 	int UID;
 	int task_ID;
+	int data_size;
 	uint8_t data[MAX_DATA_CAPACITY];
 };
 

@@ -8,8 +8,12 @@ struct Task {
 	int assigner_fd;
 	int created_at;
 	int active;
-	uint8_t buf[sizeof(struct io_packet)];
-	int buf_ptr;
+	uint8_t assigner_buf[sizeof(struct io_packet)];
+	int assigner_buf_ptr;
+	int assigner_buf_filled;
+	uint8_t *client_buf;
+	int client_buf_ptr;
+	int client_buf_size;
 	uv_poll_t poll_handle;
 	napi_value cb;
 	napi_value close_cb;
@@ -326,6 +330,54 @@ napi_value handle_accept_assigner_fd(uv_poll_t *handle, int status,
 	}
 }
 
+napi_value handle_assigner_fd_close(uv_handle_t *handle) {
+	struct Task *t = (struct Task *)handle->data;
+
+	t->filled = 0;
+	close(t->assigner_fd);
+}
+
+napi_value handle_find_fd_close(uv_poll_t *handle) {}
+
+napi_value handle_find_fd(uv_poll_t *handle, int status, int events) {
+	while (1) {
+		int res = getNextDGRAMPacket(find_fd, buf, buf_size, 0, addr, addrLen);
+
+		if (res == EXIT_SUCCESS) {
+			// copy to fonp
+			memcpy(fonp, buf, fonp_size);
+
+			if (fonp->is_monitor == 1) {
+				printc(RED, "Gateway - handle_find_fd", "Send fonp to: %s\n",
+					   getPrintableIP(addr));
+				// send fnp packet again
+				sendFindNodePacket(0);
+				continue;
+			}
+
+			// remove from retryList
+			if (removeFromRetryList(find_fd, fonp->packet_type, fonp_size) ==
+				NO) {
+				printc(RED, "Gateway - handle_find_fd",
+					   "Not found in retry list\n");
+				continue;
+			}
+			for (int i = 0; i < taskListLength; i++) {
+				if (taskList[i].filled == 1 && taskList[i].assigner_fd == -1) {
+					// send task packet to assigner
+					printc(RED, "Gateway - handle_find_fd",
+						   "Send task packet to: %s\n",
+						   getPrintableIP(&fonp->addr));
+					sendTaskPacket(i);
+					break;
+				}
+			}
+		} else if (res != 2) {
+			break;
+		}
+	}
+}
+
 napi_value handle_assigner_fd(uv_poll_t *handle, int status, int events) {
 	struct Task *t = (struct Task *)handle->data;
 
@@ -335,34 +387,60 @@ napi_value handle_assigner_fd(uv_poll_t *handle, int status, int events) {
 			t->created_at = getCurrTime();
 		}
 
-		int required = iop_size - t->buf_ptr;
-		int sent = send(t->assigner_fd, t->buf, required, 0);
+		while (1) {
+			if (t->assigner_buf_ptr >= 0) {
+				int required = t->assigner_buf_filled - t->assigner_buf_ptr;
+				int sent =
+					send(t->assigner_fd, t->assigner_buf + t->assigner_buf_ptr,
+						 required, 0);
 
-		if (sent < required) {
-			t->buf_ptr += max(sent, 0);
-			printc(RED, "Gateway - handle_assigner_fd",
-				   "Buffer not yet sent\n");
-			return;
+				t->assigner_buf_ptr += max(sent, 0);
+				if (sent == -1 && (errno == EWOULDBLOCK || errno == EAGAIN)) {
+					break;
+				} else if (sent == -1) {
+					printc(RED, "gateway - handle_assigner_fd",
+						   "Error while sending\n");
+					perror("socket");
+					break;
+				}
+
+				t->assigner_buf_ptr = -1;
+			} else {
+				// now check in the client buffer
+				int required = min(t->client_buf_size - t->client_buf_ptr,
+								   MAX_DATA_CAPACITY);
+
+				if (required == 0) {
+					// now websocket can resume
+					napi_value global;
+					status = napi_get_global(t->env, &global);
+					if (status != napi_ok) {
+						printc(RED, "Gateway - handle_assigner_fd",
+							   "Could not get global\n");
+						return;
+					}
+
+					napi_status status = napi_call_function(
+						t->env, global, t->cb, 1, t->taskID, NULL);
+					if (status != napi_ok) {
+						printc(RED, "Gateway - handle_assigner_fd",
+							   "Call to cb failed\n");
+						return;
+					}
+
+					modifyFDInNodeEpoll(&t->poll_handle, UV_READABLE,
+										handle_assigner_fd,
+										handle_assigner_fd_close);
+				}
+
+				memcpy(t->assigner_buf, t->client_buf + t->client_buf_ptr,
+					   required);
+				t->assigner_buf_ptr = 0;
+				t->assigner_buf_filled = required;
+
+				t->client_buf_ptr += required;
+			}
 		}
-
-		// now websocket can resume
-		napi_value global;
-		status = napi_get_global(t->env, &global);
-		if (status != napi_ok) {
-			printc(RED, "Gateway - handle_assigner_fd",
-				   "Could not get global\n");
-			return;
-		}
-
-		napi_status status =
-			napi_call_function(t->env, global, t->cb, 1, t->taskID, NULL);
-		if (status != napi_ok) {
-			printc(RED, "Gateway - handle_assigner_fd", "Call to cb failed\n");
-			return;
-		}
-
-		modifyFDInNodeEpoll(&t->poll_handle, UV_READABLE, handle_assigner_fd,
-							handle_assigner_fd_close);
 	} else if (events & UV_DISCONNECT) {
 		printc(RED, "Gateway - handle_assigner_fd", "assigner disconnected\n");
 		// close the websocket
@@ -389,17 +467,21 @@ napi_value handle_assigner_fd(uv_poll_t *handle, int status, int events) {
 		}
 
 		while (1) {
-			int packet_type = getPacketType(task_fd, &t->buf, &t->buf_ptr);
+			int packet_type =
+				getPacketType(task_fd, &t->assigner_buf, &t->assigner_buf_ptr);
 
 			if (packet_type == IO_PACKET) {
-				int res =
-					getPacketData(task_fd, &t->buf, &t->buf_ptr, iop, iop_size);
+				int res = getIOPacketData(task_fd, &t->assigner_buf,
+										  &t->assigner_buf_ptr, iop,
+										  &t->assigner_buf_filled);
 
 				if (res == YES) {
+					int dataSize =
+						t->assigner_buf_filled + MAX_DATA_CAPACITY - iop_size;
 					napi_value buffer;
-					void *buffer_data;
+					uint8_t *buffer_data;
 					napi_status status = napi_create_buffer(
-						t->env, MAX_DATA_CAPACITY, &buffer_data, &buffer);
+						t->env, dataSize, &buffer_data, &buffer);
 
 					if (status != napi_ok) {
 						printc(RED, "Gateway - handle_assigner_fd",
@@ -409,7 +491,7 @@ napi_value handle_assigner_fd(uv_poll_t *handle, int status, int events) {
 						continue;
 					}
 
-					memcpy(buffer_data, &iop->data, MAX_DATA_CAPACITY);
+					memcpy(buffer_data, &iop->data, dataSize);
 
 					napi_value global = getNapiGlobal(t->env);
 					if (global == NULL) {
@@ -462,54 +544,6 @@ napi_value handle_assigner_fd(uv_poll_t *handle, int status, int events) {
 	}
 }
 
-napi_value handle_assigner_fd_close(uv_handle_t *handle) {
-	struct Task *t = (struct Task *)handle->data;
-
-	t->filled = 0;
-	close(t->assigner_fd);
-}
-
-napi_value handle_find_fd_close(uv_poll_t *handle) {}
-
-napi_value handle_find_fd(uv_poll_t *handle, int status, int events) {
-	while (1) {
-		int res = getNextDGRAMPacket(find_fd, buf, buf_size, 0, addr, addrLen);
-
-		if (res == EXIT_SUCCESS) {
-			// copy to fonp
-			memcpy(fonp, buf, fonp_size);
-
-			if (fonp->is_monitor == 1) {
-				printc(RED, "Gateway - handle_find_fd", "Send fonp to: %s\n",
-					   getPrintableIP(addr));
-				// send fnp packet again
-				sendFindNodePacket(0);
-				continue;
-			}
-
-			// remove from retryList
-			if (removeFromRetryList(find_fd, fonp->packet_type, fonp_size) ==
-				NO) {
-				printc(RED, "Gateway - handle_find_fd",
-					   "Not found in retry list\n");
-				continue;
-			}
-			for (int i = 0; i < taskListLength; i++) {
-				if (taskList[i].filled == 1 && taskList[i].assigner_fd == -1) {
-					// send task packet to assigner
-					printc(RED, "Gateway - handle_find_fd",
-						   "Send task packet to: %s\n",
-						   getPrintableIP(&fonp->addr));
-					sendTaskPacket(i);
-					break;
-				}
-			}
-		} else if (res != 2) {
-			break;
-		}
-	}
-}
-
 napi_value OnMessage(napi_env env, napi_callback_info info) {
 	napi_status status;
 	int argc = 2;
@@ -530,15 +564,6 @@ napi_value OnMessage(napi_env env, napi_callback_info info) {
 		return napiUndefined(env);
 	}
 
-	void *buf;
-	int bufLen = MAX_DATA_CAPACITY;
-	status = napi_get_buffer_info(env, args[0], &buf, &bufLen);
-	if (status != napi_ok) {
-		printc(RED, "Gateway - OnMessage", "Could not get buffer info\n");
-		printNapiError(env, "OnMessage - buffer");
-		return napiUndefined(env);
-	}
-
 	int taskID;
 	status = napi_get_value_int32(env, args[1], &taskID);
 	if (status != napi_ok || taskID < 0 || taskID >= taskListLength) {
@@ -549,21 +574,48 @@ napi_value OnMessage(napi_env env, napi_callback_info info) {
 	}
 
 	struct Task *t = &taskList[taskID];
-	iop->packet_ID = PACKET_ID;
-	iop->packet_type = IO_PACKET;
-	iop->node_type = GATEWAY_NODE;
-	iop->UID = UID;
-	iop->task_ID = taskID;
-	memcpy(&iop->data, buf, MAX_DATA_CAPACITY);
-	int sent = send(t->assigner_fd, iop, iop_size, 0);
-	if (sent < iop_size) {
-		t->buf_ptr = max(sent, 0);
-		memcpy(&t->buf, iop, iop_size);
 
-		uv_poll_start(&t->poll_handle, UV_WRITABLE, handle_assigner_fd);
-
-		return napiBool(env, 1);
+	status =
+		napi_get_buffer_info(env, args[0], &t->client_buf, &t->client_buf_size);
+	t->client_buf_ptr = 0;
+	if (status != napi_ok) {
+		printc(RED, "Gateway - OnMessage", "Could not get buffer info\n");
+		printNapiError(env, "OnMessage - buffer");
+		return napiUndefined(env);
 	}
+
+	while (1) {
+		iop->packet_ID = PACKET_ID;
+		iop->packet_type = IO_PACKET;
+		iop->node_type = GATEWAY_NODE;
+		iop->UID = UID;
+		iop->task_ID = taskID;
+		int dataSize =
+			min(MAX_DATA_CAPACITY, t->client_buf_size - t->client_buf_ptr);
+		int packetSize = iop_size - MAX_DATA_CAPACITY + dataSize;
+		memcpy(&iop->data, t->client_buf + t->client_buf_ptr, dataSize);
+		t->client_buf_ptr += dataSize;
+		int sent = send(t->assigner_fd, iop, packetSize, 0);
+
+		if (sent == -1 && (errno == EWOULDBLOCK || errno == EAGAIN)) {
+			break;
+		} else if (sent == -1) {
+			printc(RED, "gateway - OnMessage",
+				   "Error while sending to socket\n");
+			perror("socket");
+			break;
+		}
+
+		if (sent < packetSize) {
+			t->assigner_buf_ptr = max(sent, 0);
+			memcpy(&t->assigner_buf, iop, packetSize);
+
+			uv_poll_start(&t->poll_handle, UV_WRITABLE, handle_assigner_fd);
+
+			return napiBool(env, 1);
+		}
+	}
+
 	return napiBool(env, 0);
 }
 
@@ -665,8 +717,8 @@ struct Task *addTask(napi_env env, napi_value cb, napi_value close_cb,
 			taskList[i].taskID = i;
 			taskList[i].created_at = getCurrTime();
 			taskList[i].active = 1;
-			memset(taskList[i].buf, 0, MAX_DATA_CAPACITY);
-			taskList[i].buf_ptr = 0;
+			memset(taskList[i].assigner_buf, 0, MAX_DATA_CAPACITY);
+			taskList[i].assigner_buf_ptr = 0;
 			taskList[i].assigner_fd = -1;
 			taskList[i].env = env;
 			taskList[i].cb = cb;
