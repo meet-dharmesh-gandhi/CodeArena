@@ -89,11 +89,13 @@ int deleteFDInEpoll(int fd) {
  * Returns EXIT_FAILTURE (1) when queue empty (hits EAGAIN or EWOULDBLOCK)
  * Returns 2 for other errors
  */
-int getNextDGRAMPacket(int __fd, void *__restrict__ __buf, size_t __n,
-					   int __flags, struct sockaddr *__restrict__ __addr,
-					   socklen_t *__restrict__ __addr_len) {
-	*__addr_len = sizeof(struct sockaddr_in);
-	int recved = recvfrom(__fd, __buf, __n, __flags, __addr, __addr_len);
+int getNextDGRAMPacket(int __fd, void *__buf, size_t __n, int __flags,
+					   struct sockaddr_in *__addr, socklen_t __addr_len) {
+	if (__addr_len != sizeof(struct sockaddr_in)) {
+		__addr_len = sizeof(struct sockaddr_in);
+	}
+	int recved = recvfrom(__fd, __buf, __n, __flags, (struct sockaddr *)__addr,
+						  &__addr_len);
 	if (recved == -1) {
 		if (errno == EAGAIN || errno == EWOULDBLOCK) {
 			return EXIT_FAILURE;
@@ -204,8 +206,8 @@ int getPacketData(int fd, uint8_t *fd_buf, int *fd_buf_ptr, uint8_t *packet,
 	return NO;
 }
 
-int getIOPacketData(int fd, uint8_t *fd_buf, int *fd_buf_ptr, uint8_t *packet,
-					int *filled) {
+int getIOPacketData(int fd, uint8_t *fd_buf, int *fd_buf_ptr,
+					struct io_packet *packet, int *filled) {
 	if (*fd_buf_ptr < 2 * sizeof(int)) {
 		return UNKNOWN;
 	}

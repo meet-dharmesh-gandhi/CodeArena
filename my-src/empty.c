@@ -32,6 +32,14 @@ const int fmp_size = sizeof(struct find_monitor_packet);
 struct socketDetails *role_timer_fd_sd, *role_fd_sd, *hb_fd_sd, *timer_fd_sd;
 int role_timer_on;
 
+void handle_role_timer_fd(struct socketDetails *sd);
+void handle_timer_fd(struct socketDetails *sd);
+void handle_hb_fd(struct socketDetails *sd);
+void handle_role_fd(struct socketDetails *sd);
+void sendHeartbeat();
+void sendDiscoveryPacket();
+int validPacket();
+
 // TODO Feature - If promotion nodes not available then make processes on the
 // same machine
 int main(int argc, char const *argv[]) {
@@ -72,25 +80,25 @@ int main(int argc, char const *argv[]) {
 
 	role_timer_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
 	role_timer_fd_sd->fd = role_timer_fd;
-	role_timer_fd_sd->handler = handle_role_timer_fd;
+	role_timer_fd_sd->handler = &handle_role_timer_fd;
 	role_timer_fd_sd->data = NULL;
 	role_timer_on = 0;
 
 	role_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
 	role_fd_sd->fd = role_fd;
-	role_fd_sd->handler = handle_role_fd;
+	role_fd_sd->handler = &handle_role_fd;
 	role_fd_sd->data = NULL;
 	role_fd_sd->events = 0;
 
 	hb_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
 	hb_fd_sd->fd = hb_fd;
-	hb_fd_sd->handler = handle_hb_fd;
+	hb_fd_sd->handler = &handle_hb_fd;
 	hb_fd_sd->data = NULL;
 	hb_fd_sd->events = 0;
 
 	timer_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
 	timer_fd_sd->fd = timer_fd;
-	timer_fd_sd->handler = handle_timer_fd;
+	timer_fd_sd->handler = &handle_timer_fd;
 	timer_fd_sd->data = NULL;
 	timer_fd_sd->events = 0;
 

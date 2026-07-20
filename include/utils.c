@@ -3,9 +3,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/fcntl.h>
 #include <sys/random.h>
-#include <sys/socket.h>
 #include <sys/timerfd.h>
 
 int randInt(int fallback, int max) {
@@ -138,16 +136,6 @@ time_t getCurrTime() {
 	return 0;
 }
 
-int setNonBlocking(int fd) {
-	int flags = fcntl(fd, F_GETFL, 0);
-	if (flags == -1) {
-		return EXIT_FAILURE;
-	}
-
-	fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-	return EXIT_SUCCESS;
-}
-
 /**
  * gets a new timerfd with `interval` and `period`
  * If isMs is 0, the interval and period are
@@ -189,35 +177,4 @@ void stopTimerFD(int timerfd) {
 	utmr.it_interval.tv_sec = 0;
 	utmr.it_interval.tv_nsec = 0;
 	timerfd_settime(timerfd, 0, &utmr, NULL);
-}
-
-int getNewSocket(const char *port, suseconds_t tv_usec, int type) {
-	int sock;
-	if (type == SOCK_DGRAM) {
-		int yes = 1;
-		struct timeval tv;
-		tv.tv_sec = 0;
-		tv.tv_usec = tv_usec;
-		sock =
-			createSocket(port, 0, SOCK_DGRAM, 3, SOL_SOCKET, SO_REUSEADDR, &yes,
-						 sizeof yes, SOL_SOCKET, SO_BROADCAST, &yes, sizeof yes,
-						 SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-	} else if (type == SOCK_STREAM) {
-		int yes = 1;
-		struct linger sl;
-		sl.l_onoff = 0;
-		sl.l_linger = 0;
-		sock = createSocket(port, STREAM_WAITING_QUEUE, SOCK_STREAM, 3,
-							SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes,
-							SOL_SOCKET, SO_BROADCAST, &yes, sizeof yes,
-							SOL_SOCKET, SO_LINGER, &sl, sizeof(sl));
-	} else {
-		return -1;
-	}
-	int success = setNonBlocking(sock);
-	if (success == EXIT_SUCCESS) {
-		return sock;
-	} else {
-		return -1;
-	}
 }

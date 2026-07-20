@@ -47,7 +47,6 @@ enum NodeTypes {
 #define ERROR -4
 
 #define PACKET_ID 0xCAF1 // CAF1 = CAP = Code Arena Project :)
-#define LARGEST_PACKET sizeof(struct io_packet)
 #define MAX_UID 10000
 
 #define HEARTBEAT_INTERVAL 10 // in milliseconds
@@ -74,13 +73,13 @@ enum NodeTypes {
 
 #define CONTAINER_STACK_SIZE 1024 * 1024 // 1 MB
 
-const int PROMOTE_WORKER_THRESHOLD = ((WORKER_CAPACITY * 80) / 100);
-const int PROMOTE_ASSIGNER_THRESHOLD = ((ASSIGNER_CAPACITY * 80) / 100);
-const int PROMOTE_MONITOR_THRESHOLD = ((MONITOR_CAPACITY * 80) / 100);
+#define PROMOTE_WORKER_THRESHOLD (int)((WORKER_CAPACITY * 80) / 100)
+#define PROMOTE_ASSIGNER_THRESHOLD (int)((ASSIGNER_CAPACITY * 80) / 100)
+#define PROMOTE_MONITOR_THRESHOLD (int)((MONITOR_CAPACITY * 80) / 100)
 
-const int DEMOTE_WORKER_THRESHOLD = ((WORKER_CAPACITY * 40) / 100);
-const int DEMOTE_ASSIGNER_THRESHOLD = ((ASSIGNER_CAPACITY * 40) / 100);
-const int DEMOTE_MONITOR_THRESHOLD = ((MONITOR_CAPACITY * 40) / 100);
+#define DEMOTE_WORKER_THRESHOLD (int)((WORKER_CAPACITY * 40) / 100)
+#define DEMOTE_ASSIGNER_THRESHOLD (int)((ASSIGNER_CAPACITY * 40) / 100)
+#define DEMOTE_MONITOR_THRESHOLD (int)((MONITOR_CAPACITY * 40) / 100)
 
 #define MIN_WORKERS 1
 #define MIN_ASSIGNERS 2
@@ -96,80 +95,9 @@ const int DEMOTE_MONITOR_THRESHOLD = ((MONITOR_CAPACITY * 40) / 100);
 #define DISCOVER_PORT "8000" // to discover a monitor on start
 #define TASK_PORT "8001" // handles everything with task, tcp and udp sockets
 #define FIND_PORT                                                              \
-	"8002" // for getting assigner and buddy addresses from monitor
+	"8002" // for getting assigner and worker addresses from monitor
 #define HEARTBEAT_PORT "8003" // for heartbeats simply
 #define ROLE_PORT "8004"	  // for promote/demote packets
-
-struct socketDetails {
-	int fd;
-	uint32_t events;
-	void *data;
-	void *(*handler)(struct socketDetails *sd);
-};
-
-struct ExpectedConnection {
-	int filled;
-	struct sockaddr_in addr;
-	int sent_packet_type;
-	void *(*handler)(struct socketDetails *sd);
-};
-
-struct RetryPacket {
-	int filled;
-	int fd;
-	int packet_type;
-	int packet_size;
-	time_t last_sent;
-	struct sockaddr_in addr;
-	uint8_t packet[LARGEST_PACKET];
-};
-
-struct TaskDetail {
-	int filled;
-	int lastConnected;
-	int top_fd;
-	int bottom_fd;
-	struct socketDetails *top_sd;
-	struct socketDetails *bottom_sd;
-	uint8_t bottom_buf[sizeof(struct io_packet)];
-	int bottom_buf_ptr;
-	int bottom_filled;
-	uint8_t top_buf[sizeof(struct io_packet)];
-	int top_buf_ptr;
-	int top_filled;
-};
-
-struct IntermediateBuffer {
-	int taken;
-	int fd;
-	uint8_t buf[sizeof(struct io_packet)];
-	int buf_ptr;
-	int filled;
-};
-
-struct NodeDetail {
-	int filled;
-	int UID;
-	int nodeType;
-	int load; // min loaded worker's load in a monitor heartbeat
-	int hasBuddy;
-	time_t lastShouted;
-	struct sockaddr_in addr;
-};
-
-struct MonitorRecord {
-	int filled;
-	int UID;
-	int min_load_worker;
-	int min_load_assigner;
-	int gateway_load;
-	time_t lastShouted;
-	struct sockaddr_in addr;
-	int workers;
-	int assigners;
-	int gateways;
-	int totalNodes;
-};
 
 #pragma pack(push, 1)
 
@@ -276,5 +204,77 @@ struct promotion_packet {
 };
 
 #pragma pack(pop)
+
+#define LARGEST_PACKET sizeof(struct io_packet)
+
+struct socketDetails {
+	int fd;
+	uint32_t events;
+	void *data;
+	void (*handler)(struct socketDetails *sd);
+};
+
+struct ExpectedConnection {
+	int filled;
+	struct sockaddr_in addr;
+	int sent_packet_type;
+	void (*handler)(struct socketDetails *sd);
+};
+
+struct RetryPacket {
+	int filled;
+	int fd;
+	int packet_type;
+	int packet_size;
+	time_t last_sent;
+	struct sockaddr_in addr;
+	uint8_t packet[LARGEST_PACKET];
+};
+
+struct TaskDetail {
+	int filled;
+	int lastConnected;
+	int top_fd;
+	int bottom_fd;
+	struct socketDetails *top_sd;
+	struct socketDetails *bottom_sd;
+	uint8_t bottom_buf[sizeof(struct io_packet)];
+	int bottom_buf_ptr;
+	int bottom_filled;
+	uint8_t top_buf[sizeof(struct io_packet)];
+	int top_buf_ptr;
+	int top_filled;
+};
+
+struct IntermediateBuffer {
+	int taken;
+	int fd;
+	uint8_t buf[sizeof(struct io_packet)];
+	int buf_ptr;
+	int filled;
+};
+
+struct NodeDetail {
+	int filled;
+	int UID;
+	int nodeType;
+	int load; // min loaded worker's load in a monitor heartbeat
+	time_t lastShouted;
+	struct sockaddr_in addr;
+};
+
+struct MonitorRecord {
+	int filled;
+	int UID;
+	int min_load_worker;
+	int min_load_assigner;
+	int gateway_load;
+	time_t lastShouted;
+	struct sockaddr_in addr;
+	int workers;
+	int assigners;
+	int gateways;
+	int totalNodes;
+};
 
 #endif

@@ -71,6 +71,48 @@ const hp_size = sizeof(struct heartbeat_packet);
 struct find_monitor_packet *fmp;
 const fmp_size = sizeof(struct find_monitor_packet);
 
+int garp();
+struct ifaddrs *getInterface();
+napi_value handle_timer_fd_close(uv_poll_t *handle);
+napi_value handle_timer_fd(uv_poll_t *handle, int status, int events);
+napi_value handle_hb_fd_close(uv_poll_t *handle);
+napi_value handle_hb_fd(uv_poll_t *handle, int status, int events);
+napi_value handle_accept_assigner_fd(uv_poll_t *handle, int status, int events);
+napi_value handle_assigner_fd_close(uv_handle_t *handle);
+napi_value handle_find_fd_close(uv_poll_t *handle);
+napi_value handle_find_fd(uv_poll_t *handle, int status, int events);
+napi_value handle_assigner_fd(uv_poll_t *handle, int status, int events);
+napi_value OnMessage(napi_env env, napi_callback_info info);
+napi_value OnDrain(napi_env env, napi_callback_info info);
+napi_value CreateTask(napi_env env, napi_callback_info info);
+void sendDiscoveryPacket();
+struct Task *addTask(napi_env env, napi_value cb, napi_value close_cb,
+					 napi_value message_cb);
+void checkMonitor();
+void sendHeartbeat();
+void removeDeadTasks();
+void retryPackets();
+int getNumberOfTasks();
+void printNapiError(napi_env env, char *func_name);
+void sendFindNodePacket(int shouldRetry);
+void addToRetryList(int fd, void *packet, int packet_size,
+					struct sockaddr_in *given_addr);
+int removeFromRetryList(int fd, int packet_type, int packet_size);
+int sendTaskPacket(int taskID);
+void addToExpectedConnectionsList(struct sockaddr_in *given_addr);
+void removeFromExpectedConnectionsList(struct sockaddr_in *given_addr);
+uv_loop_t *getUVLoop(napi_env env);
+struct Task *setTaskFD(int fd);
+int addFDToNodeEpoll(uv_poll_t *node_loop, uv_poll_t *handle, int fd,
+					 int events, uv_poll_cb cb, uv_poll_cb close_cb);
+int modifyFDInNodeEpoll(uv_poll_t *handle, int events, uv_poll_cb cb,
+						uv_poll_cb close_cb);
+napi_value getNapiGlobal(napi_env env);
+napi_value napiBool(napi_env env, int boolean);
+napi_value napiInt32(napi_env env, int i);
+napi_value napiUndefined(napi_env env);
+napi_value napiPanic(napi_env env);
+
 napi_value Init(napi_env env, napi_value exports) {
 	if (garp() == NO) {
 		printc(RED, "Gateway - Init", "garp failed\n");
@@ -287,7 +329,8 @@ napi_value handle_accept_assigner_fd(uv_poll_t *handle, int status,
 	}
 
 	while (1) {
-		int res = accept(accept_assigner_fd, addr, addrLen);
+		int addrLength = addrLen;
+		int res = accept(accept_assigner_fd, addr, &addrLength);
 
 		if (res < 0) {
 			if (errno == EAGAIN || errno == EWOULDBLOCK) {

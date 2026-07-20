@@ -8,7 +8,6 @@
 #include "morph.h"
 #include "network.h"
 #include "print.h"
-#include "threads.h"
 #include "utils.h"
 
 #include <errno.h>

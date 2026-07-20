@@ -5,8 +5,11 @@
 #include <netdb.h>
 #include <stdarg.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/fcntl.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <unistd.h>
 
 #define MAX_TRIES 3
 
@@ -28,7 +31,7 @@ int sendFull(int __fd, const void *__buf, size_t __n, int __flags) {
 	return EXIT_SUCCESS;
 }
 
-int recvFull(int __fd, void *__buf, size_t __n, int __flags) {
+int recvFull(int __fd, const void *__buf, size_t __n, int __flags) {
 	ssize_t recved = 0;
 	int tries = 0;
 	while (recved < __n) {
@@ -43,6 +46,16 @@ int recvFull(int __fd, void *__buf, size_t __n, int __flags) {
 		}
 		tries += 1;
 	}
+	return EXIT_SUCCESS;
+}
+
+int setNonBlocking(int fd) {
+	int flags = fcntl(fd, F_GETFL, 0);
+	if (flags == -1) {
+		return EXIT_FAILURE;
+	}
+
+	fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 	return EXIT_SUCCESS;
 }
 
@@ -122,6 +135,37 @@ int createSocket(const char *port_number, int waiting_queue, int sock_type,
 	}
 
 	return sin;
+}
+
+int getNewSocket(const char *port, suseconds_t tv_usec, int type) {
+	int sock;
+	if (type == SOCK_DGRAM) {
+		int yes = 1;
+		struct timeval tv;
+		tv.tv_sec = 0;
+		tv.tv_usec = tv_usec;
+		sock =
+			createSocket(port, 0, SOCK_DGRAM, 3, SOL_SOCKET, SO_REUSEADDR, &yes,
+						 sizeof yes, SOL_SOCKET, SO_BROADCAST, &yes, sizeof yes,
+						 SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+	} else if (type == SOCK_STREAM) {
+		int yes = 1;
+		struct linger sl;
+		sl.l_onoff = 0;
+		sl.l_linger = 0;
+		sock = createSocket(port, STREAM_WAITING_QUEUE, SOCK_STREAM, 3,
+							SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes,
+							SOL_SOCKET, SO_BROADCAST, &yes, sizeof yes,
+							SOL_SOCKET, SO_LINGER, &sl, sizeof(sl));
+	} else {
+		return -1;
+	}
+	int success = setNonBlocking(sock);
+	if (success == EXIT_SUCCESS) {
+		return sock;
+	} else {
+		return -1;
+	}
 }
 
 void set_broadcast_addr(const char *port_number, struct sockaddr_in *addr) {

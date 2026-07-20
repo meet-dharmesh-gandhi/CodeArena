@@ -33,8 +33,11 @@ uint8_t n_files;
 uint8_t *buf;
 char *filename;
 
+int createFile(int container_fd);
+void connectFD(int source_fd, int target_fd);
+
 // TODO add limits to the container
-void run_container(void *arg) {
+int run_container(void *arg) {
 	printc(INFO, "container - run_container", "Container started\n");
 	int container_fd = *(int *)arg;
 	buf = malloc(MAX_FILE_SIZE);
@@ -97,7 +100,7 @@ int createFile(int container_fd) {
 	}
 
 	// got the filename size
-	memcpy(filename_size, buf, required);
+	memcpy(&filename_size, buf, required);
 
 	// next get the filename
 	required = filename_size;
@@ -126,7 +129,7 @@ int createFile(int container_fd) {
 	printc(INFO, "container - createFile", "Filename: %s\n", filename);
 
 	// got the file size
-	memcpy(file_size, buf, required);
+	memcpy(&file_size, buf, required);
 
 	if (file_size > MAX_FILE_SIZE) {
 		printc(ERR, "container - createFile", "file too huge, file size: %d\n",

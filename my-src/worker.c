@@ -1,4 +1,5 @@
 #include "../include/all.h"
+#include "./container.c"
 
 int UID;
 
@@ -47,7 +48,33 @@ const int taop_size = sizeof(struct task_over_packet);
 struct socketDetails *task_fd_sd, *hb_fd_sd, *assigner_fd_sd, *role_fd_sd,
 	*timer_fd_sd;
 
-extern void run_container(void *arg);
+extern int run_container(void *arg);
+
+void killContainer(int fd);
+int getContainerTaskID(int fd);
+struct IntermediateBuffer *getNodeIB(int fd);
+struct IntermediateBuffer *getIB();
+void sendTaskOverPacket(int fd);
+void createContainer(struct TaskDetail *t);
+void writeToPath(char *map_buf, int pid, char *path);
+void cleanUpTasks();
+void sendHeartbeat();
+int getLoad();
+void sendDiscoveryPacket();
+int removeFromTaskList(int taskID);
+int addToTaskList(int taskID, int assigner_fd);
+void sendCancelTaskTCPPacket(int taskID, int fd);
+void sendCancelTaskPacket(int taskID, struct sockaddr_in *given_addr);
+int isFull();
+int validPacket();
+int requestTCPConnection(int fd, struct sockaddr_in *given_addr, void *data);
+
+void handle_container(struct socketDetails *sd);
+void handle_timer_fd(struct socketDetails *sd);
+void handle_role_fd(struct socketDetails *sd);
+void handle_assigner_fd(struct socketDetails *sd);
+void handle_hb_fd(struct socketDetails *sd);
+void handle_task_fd(struct socketDetails *sd);
 
 int main(int argc, char const *argv[]) {
 	UID = randInt(-1, MAX_UID);
@@ -92,31 +119,31 @@ int main(int argc, char const *argv[]) {
 
 	task_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
 	task_fd_sd->fd = task_fd;
-	task_fd_sd->handler = handle_task_fd;
+	task_fd_sd->handler = &handle_task_fd;
 	task_fd_sd->events = 0;
 	task_fd_sd->data = NULL;
 
 	hb_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
 	hb_fd_sd->fd = hb_fd;
-	hb_fd_sd->handler = handle_hb_fd;
+	hb_fd_sd->handler = &handle_hb_fd;
 	hb_fd_sd->events = 0;
 	hb_fd_sd->data = NULL;
 
 	assigner_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
 	assigner_fd_sd->fd = assigner_fd;
-	assigner_fd_sd->handler = handle_assigner_fd;
+	assigner_fd_sd->handler = &handle_assigner_fd;
 	assigner_fd_sd->events = 0;
 	assigner_fd_sd->data = NULL;
 
 	role_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
 	role_fd_sd->fd = role_fd;
-	role_fd_sd->handler = handle_role_fd;
+	role_fd_sd->handler = &handle_role_fd;
 	role_fd_sd->events = 0;
 	role_fd_sd->data = NULL;
 
 	timer_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
 	timer_fd_sd->fd = timer_fd;
-	timer_fd_sd->handler = handle_timer_fd;
+	timer_fd_sd->handler = &handle_timer_fd;
 	timer_fd_sd->events = 0;
 	timer_fd_sd->data = NULL;
 
@@ -154,16 +181,16 @@ void handle_container(struct socketDetails *sd) {
 
 				while (1) {
 					int packet_type =
-						getPacketType(t->top_fd, &aIb->buf, &aIb->buf_ptr);
+						getPacketType(t->top_fd, aIb->buf, &aIb->buf_ptr);
 
 					if (packet_type == IO_PACKET) {
 						// copy to iop
 						int done =
-							getIOPacketData(t->top_fd, &aIb->buf, &aIb->buf_ptr,
+							getIOPacketData(t->top_fd, aIb->buf, &aIb->buf_ptr,
 											iop, &aIb->filled);
 
 						if (done == YES) {
-							int sent = send(t->bottom_fd, iop, &aIb->filled, 0);
+							int sent = send(t->bottom_fd, iop, aIb->filled, 0);
 
 							if (sent < aIb->filled) {
 								memcpy(t->top_buf, aIb->buf, aIb->filled);
@@ -177,8 +204,9 @@ void handle_container(struct socketDetails *sd) {
 						}
 					} else if (packet_type == TASK_PACKET) {
 						// copy to tp
-						int done = getPacketData(t->top_fd, &aIb->buf,
-												 &aIb->buf_ptr, tp, tp_size);
+						int done =
+							getPacketData(t->top_fd, aIb->buf, &aIb->buf_ptr,
+										  (uint8_t *)tp, tp_size);
 
 						if (done == YES) {
 							if (addToTaskList(tp->taskID, sd->fd) == NO) {
@@ -378,7 +406,6 @@ void handle_assigner_fd(struct socketDetails *sd) {
 		modifyFDInEpoll(sd->fd, EPOLL_IN | EPOLLOUT | EPOLL_DESTROY, sd);
 	} else if (sd->events & EPOLL_DESTROY) {
 		// assigner lost contact...
-		// wait for buddy to send a connection
 		printc(INFO, "worker - handle_assigner_fd", "Connection dropped\n");
 		// kill the container
 		for (int i = 0; i < taskListLength; i++) {
@@ -389,12 +416,12 @@ void handle_assigner_fd(struct socketDetails *sd) {
 		}
 	} else if (sd->events & EPOLLIN) {
 		while (1) {
-			int packet_type = getPacketType(sd->fd, &ib->buf, &ib->buf_ptr);
+			int packet_type = getPacketType(sd->fd, ib->buf, &ib->buf_ptr);
 
 			if (packet_type == IO_PACKET) {
 				// copy to iop
-				int done = getIOPacketData(sd->fd, &ib->buf, &ib->buf_ptr, iop,
-										   ib->filled);
+				int done = getIOPacketData(sd->fd, ib->buf, &ib->buf_ptr, iop,
+										   &ib->filled);
 
 				if (done == YES) {
 					printc(INFO, "worker - handle_assigner_fd",
@@ -416,8 +443,8 @@ void handle_assigner_fd(struct socketDetails *sd) {
 				}
 			} else if (packet_type == TASK_PACKET) {
 				// copy to tp
-				int done =
-					getPacketData(sd->fd, &ib->buf, &ib->buf_ptr, tp, tp_size);
+				int done = getPacketData(sd->fd, ib->buf, &ib->buf_ptr,
+										 (uint8_t *)tp, tp_size);
 
 				if (done == YES) {
 					printc(INFO, "worker - handle_assigner_fd", "Task: %d\n",
@@ -561,7 +588,7 @@ void sendTaskOverPacket(int fd) {
 	}
 }
 
-int createContainer(struct TaskDetail *t) {
+void createContainer(struct TaskDetail *t) {
 	printc(INFO, "worker - createContainer",
 		   "Creating container for task: %d\n", tp->taskID);
 	int uds[2];
@@ -580,7 +607,7 @@ int createContainer(struct TaskDetail *t) {
 	// allocate the stack
 	uint8_t *stack = amalloc(&arena, sizeof(uint8_t) * CONTAINER_STACK_SIZE);
 
-	int container_pid = clone(run_container, stack + CONTAINER_STACK_SIZE,
+	int container_pid = clone(&run_container, stack + CONTAINER_STACK_SIZE,
 							  CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID |
 								  CLONE_NEWUTS | SIGCHLD,
 							  &uds[1]);
@@ -621,8 +648,8 @@ void writeToPath(char *map_buf, int pid, char *path) {
 
 	FILE *f = fopen(path_buf, "w");
 
-	if (!f) {
-		return NO;
+	if (f == NULL) {
+		return;
 	}
 
 	fprintf(f, map_buf);
@@ -818,7 +845,7 @@ int validPacket() {
 int requestTCPConnection(int fd, struct sockaddr_in *given_addr, void *data) {
 	if (fd < 0) {
 		// invalid fd
-		return;
+		return EXIT_FAILURE;
 	}
 
 	if (given_addr == NULL) {

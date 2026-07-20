@@ -10,6 +10,8 @@
 #define EMPTY_NODE_PATH "../my-src/empty"
 #define GATEWAY_PATH "cd ../my-src/node && npm run dev"
 
+void replace(char *str, int isPath);
+
 void morph(int nodeType) {
 	switch (nodeType) {
 	case MONITOR_NODE:
@@ -33,7 +35,7 @@ void morph(int nodeType) {
 	}
 }
 
-void replace(const char *str, int isPath) {
+void replace(char *str, int isPath) {
 	if (isPath == 1) {
 		char *args[] = {str, NULL};
 		execvp(args[0], args);

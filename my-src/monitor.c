@@ -12,7 +12,7 @@ struct ExpectedConnection *expectedConnectionsList;
 const int expectedConnectionsListLength =
 	sizeof(struct ExpectedConnection) * MONITOR_CAPACITY;
 
-int find_fd, hb_fd, role_fd, monitor_fd, timer_fd;
+int discover_fd, find_fd, hb_fd, role_fd, monitor_fd, timer_fd;
 
 uint8_t *fd_buf;
 const int fdBufSize = sizeof(uint8_t) * LARGEST_PACKET;
@@ -36,8 +36,46 @@ struct demotion_packet *dp;
 const int dp_size = sizeof(struct demotion_packet);
 struct promotion_packet *pp;
 const int pp_size = sizeof(struct promotion_packet);
+struct find_monitor_packet *fmp;
+const int fmp_size = sizeof(struct find_monitor_packet);
 
-struct socketDetails *find_fd_sd, *hb_fd_sd, *role_fd_sd, *timer_fd_sd;
+struct socketDetails *discover_fd_sd, *find_fd_sd, *hb_fd_sd, *role_fd_sd,
+	*timer_fd_sd;
+
+void cleanUpNodes();
+void sendRolePackets();
+void sendPromotePacket(int nodeType, int targetNodeType);
+void sendDemotePackets(int nodeType, int nodes);
+void deliverPromotePacket(int promoted_node_type, int target_node_type,
+						  struct sockaddr_in *given_addr);
+void deliverDemotePacket(int demoted_node_type, int nodes_to_demote,
+						 struct sockaddr_in *given_addr);
+int getNode(int nodeType);
+int getGlobalNodes(int nodeType);
+int haveHighestUID();
+void sendHeartbeat();
+int getGatewayLoad();
+int getTotalNodes(int nodeType);
+void registerMonitorHeartbeat();
+int findMonitor(struct sockaddr_in *given_addr);
+int isMonitorFull();
+void registerNodeHeartbeat();
+int findNode(struct sockaddr_in *given_addr);
+int isFull();
+int getGlobalMinLoadedWorker();
+int getLocalMinLoadedWorker();
+void sendFoundNodePacket(int is_monitor, struct sockaddr_in *node_addr,
+						 struct sockaddr_in *given_addr);
+int getAnyMonitor();
+int getGlobalMinLoadedAssigner();
+int getLocalMinLoadedAssigner();
+int validPacket();
+
+void handle_discover_fd(struct socketDetails *sd);
+void handle_timer_fd(struct socketDetails *sd);
+void handle_role_fd(struct socketDetails *sd);
+void handle_hb_fd(struct socketDetails *sd);
+void handle_find_fd(struct socketDetails *sd);
 
 int main(int argc, char const *argv[]) {
 	UID = UID = randInt(-1, MAX_UID);
@@ -59,6 +97,7 @@ int main(int argc, char const *argv[]) {
 	broadcastAddr = amalloc(&arena, addrLen);
 	set_broadcast_addr(DISCOVER_PORT, broadcastAddr);
 
+	discover_fd = getNewSocket(DISCOVER_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
 	find_fd = getNewSocket(FIND_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
 	hb_fd = getNewSocket(FIND_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
 	role_fd = getNewSocket(FIND_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
@@ -74,40 +113,75 @@ int main(int argc, char const *argv[]) {
 	mhb = amalloc(&arena, mhb_size);
 	dp = amalloc(&arena, dp_size);
 	pp = amalloc(&arena, pp_size);
+	fmp = amalloc(&arena, fmp_size);
+
+	discover_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
+	discover_fd_sd->fd = discover_fd;
+	discover_fd_sd->handler = &handle_discover_fd;
+	discover_fd_sd->data = NULL;
+	discover_fd_sd->events = 0;
 
 	find_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
 	find_fd_sd->fd = find_fd;
-	find_fd_sd->handler = handle_find_fd;
+	find_fd_sd->handler = &handle_find_fd;
 	find_fd_sd->data = NULL;
 	find_fd_sd->events = 0;
 
 	hb_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
 	hb_fd_sd->fd = hb_fd;
-	hb_fd_sd->handler = handle_hb_fd;
+	hb_fd_sd->handler = &handle_hb_fd;
 	hb_fd_sd->data = NULL;
 	hb_fd_sd->events = 0;
 
 	role_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
 	role_fd_sd->fd = role_fd;
-	role_fd_sd->handler = handle_role_fd;
+	role_fd_sd->handler = &handle_role_fd;
 	role_fd_sd->data = NULL;
 	role_fd_sd->events = 0;
 
 	timer_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
 	timer_fd_sd->fd = timer_fd;
-	timer_fd_sd->handler = handle_timer_fd;
+	timer_fd_sd->handler = &handle_timer_fd;
 	timer_fd_sd->data = NULL;
 	timer_fd_sd->events = 0;
 
 	printc(INFO, "monitor", "Event loop starting\n");
 
-	startLoop(MAX_EVENTS, 4, find_fd_sd, hb_fd_sd, role_fd_sd, timer_fd_sd);
+	startLoop(MAX_EVENTS, 5, discover_fd, find_fd_sd, hb_fd_sd, role_fd_sd,
+			  timer_fd_sd);
 
 	printc(INFO, "monitor", "Event loop ending\n");
 
 	freeArena(&arena);
 
 	return 0;
+}
+
+void handle_discover_fd(struct socketDetails *sd) {
+	printc(INFO, "monitor - handle_discover_fd", "Some discovery packet\n");
+	while (1) {
+		int res =
+			getNextDGRAMPacket(sd->fd, fd_buf, fdBufSize, 0, addr, addrLen);
+
+		if (res == EXIT_SUCCESS) {
+			int packet_type = validPacket();
+
+			if (packet_type == FIND_MONITOR_PACKET) {
+				// copy to fmp
+				memcpy(fmp, fd_buf, fmp_size);
+
+				for (int i = 0; i < nodeListLength; i++) {
+					if (nodeList[i].filled == 0) {
+						nodeList[i].filled = 1;
+						memcpy(&nodeList[i].addr, addr, addrLen);
+						nodeList[i].lastShouted = getCurrTime();
+					}
+				}
+			}
+		} else if (res != 2) {
+			break;
+		}
+	}
 }
 
 void handle_timer_fd(struct socketDetails *sd) {
@@ -519,7 +593,7 @@ void deliverDemotePacket(int demoted_node_type, int nodes_to_demote,
 }
 
 int getNode(int nodeType) {
-	for (int i = 0; i < nodeList; i++) {
+	for (int i = 0; i < nodeListLength; i++) {
 		if (nodeList[i].filled == 1 && nodeList[i].nodeType == nodeType) {
 			return i;
 		}
@@ -801,21 +875,6 @@ int getLocalMinLoadedWorker() {
 	}
 
 	return minLoadWorkerInd == -1 ? NO : minLoadWorkerInd;
-}
-
-/**
- * Returns the index of the assigner without
- * a buddy in current node list
- * Returns NO if no such assigner is found
- */
-int findBuddy() {
-	for (int i = 0; i < nodeListLength; i++) {
-		if (nodeList[i].filled == 1 && nodeList[i].hasBuddy == 1) {
-			return i;
-		}
-	}
-
-	return NO;
 }
 
 /**

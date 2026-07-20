@@ -4,9 +4,8 @@
 
 extern void startLoop(int max_events, int nfds, ...);
 
-extern int getNextDGRAMPacket(int __fd, void *__restrict__ __buf, size_t __n,
-							  int __flags, struct sockaddr *__restrict__ __addr,
-							  socklen_t *__restrict__ __addr_len);
+extern int getNextDGRAMPacket(int __fd, void *__buf, size_t __n, int __flags,
+							  struct sockaddr_in *__addr, socklen_t __addr_len);
 
 extern int getNextSTREAMPacket(int __fd, void *__restrict__ __buf, size_t __n,
 							   int __flags);
@@ -25,6 +24,6 @@ extern int getPacketData(int fd, uint8_t *fd_buf, int *fd_buf_ptr,
 						 uint8_t *packet, int packet_len);
 
 extern int getIOPacketData(int fd, uint8_t *fd_buf, int *fd_buf_ptr,
-						   uint8_t *packet, int *filled);
+						   struct io_packet *packet, int *filled);
 
 #endif
