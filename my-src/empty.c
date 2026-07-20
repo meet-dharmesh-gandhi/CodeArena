@@ -32,6 +32,8 @@ const int fmp_size = sizeof(struct find_monitor_packet);
 struct socketDetails *role_timer_fd_sd, *role_fd_sd, *hb_fd_sd, *timer_fd_sd;
 int role_timer_on;
 
+// TODO Feature - If promotion nodes not available then make processes on the
+// same machine
 int main(int argc, char const *argv[]) {
 	UID = randInt(-1, MAX_UID);
 
