@@ -365,8 +365,6 @@ void handle_gateway_fd(struct socketDetails *sd) {
 				int done = getIOPacketData(sd->fd, &ib->buf, &ib->buf_ptr, iop,
 										   &ib->filled);
 
-				// TODO break when done has a value of ERROR and
-				// print the error when done has a value of UNKNOWN
 				if (done == YES) {
 					printc(INFO, "assigner - handle_gateway_fd",
 						   "Got IO packet, task %d\n", iop->task_ID);
