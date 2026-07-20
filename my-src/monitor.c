@@ -123,8 +123,8 @@ void handle_timer_fd(struct socketDetails *sd) {
 	sendRolePackets();
 }
 
-// TODO Monitor should send demote / promote
-// packets to other nodes too
+// TODO Workers and assigners should not take in more tasks, but should first
+// complete their tasks
 void handle_role_fd(struct socketDetails *sd) {
 	while (1) {
 		int res =
@@ -134,10 +134,36 @@ void handle_role_fd(struct socketDetails *sd) {
 			int packet_type = validPacket();
 
 			if (packet_type == PROMOTE_PACKET) {
-				// should not happen
+				// copy to pp
+				memcpy(pp, fd_buf, pp_size);
+
+				int ind = getNode(pp->promoted_node_type);
+				if (ind != -1) {
+					sendto(role_fd, pp, pp_size, 0, &nodeList[ind].addr,
+						   addrLen);
+				}
 			} else if (packet_type == DEMOTE_PACKET) {
-				printc(IMP, "monitor - handle_role_fd", "Demoting\n");
-				morph(EMPTY_NODE);
+				// copy to dp
+				memcpy(dp, fd_buf, dp_size);
+
+				if (dp->demoted_node_type == ASSIGNER_NODE ||
+					dp->demoted_node_type == WORKER_NODE ||
+					dp->demoted_node_type == GATEWAY_NODE) {
+					int cnt = 0;
+					for (int i = 0; i < nodeListLength; i++) {
+						if (cnt == dp->nodes_to_demote) {
+							break;
+						}
+						if (nodeList[i].filled == 1 &&
+							nodeList[i].nodeType == dp->demoted_node_type) {
+							cnt++;
+							deliverDemotePacket(EMPTY_NODE, 1,
+												&nodeList[i].addr);
+						}
+					}
+				} else if (dp->demoted_node_type == MONITOR_NODE) {
+					morph(EMPTY_NODE);
+				}
 			}
 		} else if (res != 2) {
 			break;
@@ -419,8 +445,15 @@ void sendDemotePackets(int nodeType, int nodes) {
 			break;
 		}
 
+		int hasNodes = 1;
+
 		if (monitorList[i].filled == 1) {
 			switch (nodeType) {
+			case GATEWAY_NODE:
+				if (monitorList[i].gateways - nodeCounts[i] > 0) {
+					nodeCounts[i]++;
+				}
+				break;
 			case ASSIGNER_NODE:
 				if (monitorList[i].assigners - nodeCounts[i] > 0) {
 					nodeCounts[i]++;
@@ -437,11 +470,17 @@ void sendDemotePackets(int nodeType, int nodes) {
 				}
 				break;
 			default:
+				hasNodes = 0;
 				break;
 			}
 		}
 		i = (i + 1) % monitorListLength;
 		iters++;
+
+		if (hasNodes == 0) {
+			printc(RED, "Insufficient nodes", "\n");
+			break;
+		}
 	}
 
 	for (int i = 0; i < monitorListLength; i++) {
@@ -477,6 +516,16 @@ void deliverDemotePacket(int demoted_node_type, int nodes_to_demote,
 	dp->demoted_node_type = demoted_node_type;
 
 	sendto(role_fd, dp, dp_size, 0, given_addr, addrLen);
+}
+
+int getNode(int nodeType) {
+	for (int i = 0; i < nodeList; i++) {
+		if (nodeList[i].filled == 1 && nodeList[i].nodeType == nodeType) {
+			return i;
+		}
+	}
+
+	return -1;
 }
 
 /**
