@@ -331,7 +331,24 @@ napi_value handle_accept_assigner_fd(uv_poll_t *handle, int status,
 }
 
 napi_value handle_assigner_fd_close(uv_handle_t *handle) {
+	printc(RED, "Gateway - handle_assigner_fd", "assigner disconnected\n");
+	// close the websocket
 	struct Task *t = (struct Task *)handle->data;
+	napi_value global;
+	int status = napi_get_global(t->env, &global);
+	if (status != napi_ok) {
+		return;
+	}
+
+	t->active = 0;
+	t->created_at = getCurrTime();
+
+	napi_status status =
+		napi_call_function(t->env, global, t->close_cb, 1, t->taskID, NULL);
+	if (status != napi_ok) {
+		printNapiError(t->env, "handle_assigner_fd");
+		return napiUndefined(t->env);
+	}
 
 	t->filled = 0;
 	close(t->assigner_fd);
@@ -442,24 +459,7 @@ napi_value handle_assigner_fd(uv_poll_t *handle, int status, int events) {
 			}
 		}
 	} else if (events & UV_DISCONNECT) {
-		printc(RED, "Gateway - handle_assigner_fd", "assigner disconnected\n");
-		// close the websocket
-		napi_value global;
-		status = napi_get_global(t->env, &global);
-		if (status != napi_ok) {
-			return;
-		}
-
-		t->active = 0;
-		t->created_at = getCurrTime();
-
-		napi_status status =
-			napi_call_function(t->env, global, t->close_cb, 1, t->taskID, NULL);
-		if (status != napi_ok) {
-			printNapiError(t->env, "handle_assigner_fd");
-			return napiUndefined(t->env);
-		}
-		// TODO put this into handle's close_cb
+		handle->close_cb(handle);
 	} else if (events & UV_READABLE) {
 		if (t->active == 0) {
 			t->active = 1;
