@@ -41,9 +41,10 @@ const int taskListLength = sizeof(struct Task) * GATEWAY_CAPACITY;
 struct ExpectedConnection *expectedConnectionsList;
 const int expectedConnectionsListLength =
 	sizeof(struct ExpectedConnection) * GATEWAY_CAPACITY;
-
+const int expectedConnectionsListSize = GATEWAY_CAPACITY;
 struct RetryPacket *retryPacketList;
 const int retryPacketListLength = sizeof(struct RetryPacket) * GATEWAY_CAPACITY;
+const int retryPacketListSize = GATEWAY_CAPACITY;
 
 struct sockaddr_in *monitorAddr;
 struct sockaddr_in *broadcastAddr;

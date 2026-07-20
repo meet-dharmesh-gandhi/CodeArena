@@ -6,21 +6,21 @@ Arena arena;
 
 struct TaskDetail *taskList;
 const int taskListSize = sizeof(struct TaskDetail) * ASSIGNER_CAPACITY;
-const int taskListLength = sizeof(struct TaskDetail);
+const int taskListLength = ASSIGNER_CAPACITY;
 struct IntermediateBuffer *intermediateBufferList;
 const int intermediateBufferListSize =
 	sizeof(struct IntermediateBuffer) * ASSIGNER_CAPACITY;
-const int intermediateBufferListLength = sizeof(struct IntermediateBuffer);
+const int intermediateBufferListLength = ASSIGNER_CAPACITY;
 struct NodeDetail *monitorList;
 const int monitorListSize = sizeof(struct NodeDetail) * ASSIGNER_CAPACITY;
-const int monitorListLength = sizeof(struct NodeDetail);
+const int monitorListLength = ASSIGNER_CAPACITY;
 struct RetryPacket *retryPacketsList;
 const int retryPacketsListSize = sizeof(struct RetryPacket) * ASSIGNER_CAPACITY;
-const int retryPacketsListLength = sizeof(struct RetryPacket);
+const int retryPacketsListLength = ASSIGNER_CAPACITY;
 struct ExpectedConnection *expectedConnectionsList;
 const int expectedConnectionsListSize =
 	sizeof(struct ExpectedConnection) * ASSIGNER_CAPACITY;
-const int expectedConnectionsListLength = sizeof(struct ExpectedConnection);
+const int expectedConnectionsListLength = ASSIGNER_CAPACITY;
 
 struct sockaddr_in *monitorAddr;
 struct sockaddr_in *addr;

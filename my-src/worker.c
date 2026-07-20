@@ -6,14 +6,14 @@ int UID;
 Arena arena;
 
 struct TaskDetail *taskList;
-const int taskListLength = sizeof(struct TaskDetail);
+const int taskListLength = WORKER_CAPACITY;
 const int taskListSize = sizeof(struct TaskDetail) * WORKER_CAPACITY;
 struct IntermediateBuffer *intermediateBufferList;
-const int intermediateBufferListLength = sizeof(struct TaskDetail);
+const int intermediateBufferListLength = WORKER_CAPACITY;
 const int intermediateBufferListSize =
 	sizeof(struct TaskDetail) * WORKER_CAPACITY;
 struct ExpectedConnection *expectedConnectionsList;
-const int expectedConnectionsListLength = sizeof(struct ExpectedConnection);
+const int expectedConnectionsListLength = WORKER_CAPACITY;
 const int expectedConnectionsListSize =
 	sizeof(struct ExpectedConnection) * WORKER_CAPACITY;
 
