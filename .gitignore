@@ -9,6 +9,9 @@
 
 **/.venv/**
 **/node_modules/**
+/node/**
 **/.vscode/**
 
 **/build/**
+
+*.tar.*

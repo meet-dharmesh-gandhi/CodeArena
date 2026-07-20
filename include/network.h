@@ -11,5 +11,6 @@ extern int createSocket(const char *port_number, int waiting_queue,
 extern int getNewSocket(const char *port, suseconds_t tv_usec, int type);
 extern void set_broadcast_addr(const char *port_number,
 							   struct sockaddr_in *addr);
+extern struct ifaddrs *getInterface(struct ifaddrs *req_ifa);
 
 #endif

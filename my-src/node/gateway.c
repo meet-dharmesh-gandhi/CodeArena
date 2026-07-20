@@ -72,7 +72,6 @@ struct find_monitor_packet *fmp;
 const fmp_size = sizeof(struct find_monitor_packet);
 
 int garp();
-struct ifaddrs *getInterface();
 napi_value handle_timer_fd_close(uv_poll_t *handle);
 napi_value handle_timer_fd(uv_poll_t *handle, int status, int events);
 napi_value handle_hb_fd_close(uv_poll_t *handle);
@@ -206,7 +205,8 @@ int garp() {
 		return NO;
 	}
 
-	struct ifaddrs *ifa = getInterface();
+	struct ifaddrs *ifa = malloc(sizeof(struct ifaddrs));
+	getInterface(ifa);
 
 	if (ifa == NULL) {
 		printc(RED, "garp", "Could not find ethernet interface\n");
@@ -248,33 +248,6 @@ int garp() {
 	close(sockfd);
 	free(ifa);
 	return YES;
-}
-
-struct ifaddrs *getInterface() {
-	struct ifaddrs *ifs = NULL;
-	struct ifaddrs *ifa = NULL;
-
-	if (getifaddrs(&ifs) < 0) {
-		printc(RED, "getInterface", "Error while getting addrs");
-		return NULL;
-	}
-
-	struct ifaddrs *req_ifa = malloc(sizeof(struct ifaddrs));
-	for (ifa = ifs; ifa != NULL; ifa = ifa->ifa_next) {
-		if (ifa->ifa_addr != NULL && ifa->ifa_addr->sa_family == AF_PACKET &&
-			ifa->ifa_flags & IFF_UP == IFF_UP &&
-			ifa->ifa_flags & IFF_LOOPBACK != IFF_LOOPBACK) {
-			struct sockaddr_ll *sll = (struct sockaddr_ll *)ifa->ifa_addr;
-
-			if (sll->sll_hatype == ARPHRD_ETHER) {
-				memcpy(req_ifa, ifa, sizeof(struct ifaddrs));
-				break;
-			}
-		}
-	}
-
-	freeifaddrs(ifs);
-	return req_ifa;
 }
 
 napi_value handle_timer_fd_close(uv_poll_t *handle) {}

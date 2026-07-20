@@ -104,8 +104,7 @@ int main(int argc, char const *argv[]) {
 
 	printc(INFO, "empty", "Event loop started\n");
 
-	startLoop(MAX_EVENTS, 4, role_timer_fd_sd, role_fd_sd, hb_fd_sd,
-			  timer_fd_sd);
+	startLoop(MAX_EVENTS, 3, role_fd_sd, hb_fd_sd, timer_fd_sd);
 
 	printc(INFO, "empty", "Event loop ended\n");
 
@@ -194,6 +193,8 @@ void handle_role_fd(struct socketDetails *sd) {
  * And if the monitor is there, it turns off the timer
  */
 void sendHeartbeat() {
+	printc(INFO, "empty - sendHeartbeat", "Starting to send heartbeat\n");
+
 	if (getCurrTime() - *monitorLastShouted > EXPIRE_PERIOD) {
 		memcpy(monitorAddr, emptyAddr, addrLen);
 	}
@@ -201,8 +202,9 @@ void sendHeartbeat() {
 	if (memcmp(monitorAddr, emptyAddr, addrLen) == 0) {
 		if (role_timer_on == 0) {
 			// add role_timer_fd to epoll
-			printc(INFO, "empty - sendHeartbeat", "Started role timer\n");
-			addFDToEpoll(role_timer_fd, EPOLLET | EPOLLONESHOT,
+			printc(IMP, "empty - sendHeartbeat", "Started role timer\n");
+			addFDToEpoll(role_timer_fd,
+						 EPOLLET | EPOLLIN | EPOLLOUT | EPOLLONESHOT,
 						 role_timer_fd_sd);
 			role_timer_on = 1;
 		}
@@ -212,7 +214,7 @@ void sendHeartbeat() {
 	}
 
 	if (role_timer_on == 1) {
-		printc(INFO, "empty - sendHeartbeat", "Ended role timer\n");
+		printc(IMP, "empty - sendHeartbeat", "Ended role timer\n");
 		deleteFDInEpoll(role_timer_fd);
 		role_timer_on = 0;
 	}
@@ -223,6 +225,8 @@ void sendHeartbeat() {
 	hp->UID = UID;
 
 	sendto(hb_fd, hp, hp_size, 0, monitorAddr, addrLen);
+
+	printc(INFO, "empty - sendHeartbeat", "Sent heartbeat\n");
 }
 
 void sendDiscoveryPacket() {

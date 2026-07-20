@@ -5,18 +5,22 @@ int UID;
 Arena arena;
 
 struct TaskDetail *taskList;
-const int taskListLength = sizeof(struct TaskDetail) * ASSIGNER_CAPACITY;
+const int taskListSize = sizeof(struct TaskDetail) * ASSIGNER_CAPACITY;
+const int taskListLength = sizeof(struct TaskDetail);
 struct IntermediateBuffer *intermediateBufferList;
-const int intermediateBufferListLength =
+const int intermediateBufferListSize =
 	sizeof(struct IntermediateBuffer) * ASSIGNER_CAPACITY;
+const int intermediateBufferListLength = sizeof(struct IntermediateBuffer);
 struct NodeDetail *monitorList;
-const int monitorListLength = sizeof(struct NodeDetail) * ASSIGNER_CAPACITY;
+const int monitorListSize = sizeof(struct NodeDetail) * ASSIGNER_CAPACITY;
+const int monitorListLength = sizeof(struct NodeDetail);
 struct RetryPacket *retryPacketsList;
-const int retryPacketsListLength =
-	sizeof(struct RetryPacket) * ASSIGNER_CAPACITY;
+const int retryPacketsListSize = sizeof(struct RetryPacket) * ASSIGNER_CAPACITY;
+const int retryPacketsListLength = sizeof(struct RetryPacket);
 struct ExpectedConnection *expectedConnectionsList;
-const int expectedConnectionsListLength =
+const int expectedConnectionsListSize =
 	sizeof(struct ExpectedConnection) * ASSIGNER_CAPACITY;
+const int expectedConnectionsListLength = sizeof(struct ExpectedConnection);
 
 struct sockaddr_in *monitorAddr;
 struct sockaddr_in *addr;
@@ -104,11 +108,11 @@ int main(int argc, char const *argv[]) {
 
 	arena = createArena(ARENA_SIZE);
 
-	taskList = amalloc(&arena, taskListLength);
-	monitorList = amalloc(&arena, monitorListLength);
-	retryPacketsList = amalloc(&arena, retryPacketsListLength);
-	intermediateBufferList = amalloc(&arena, intermediateBufferListLength);
-	expectedConnectionsList = amalloc(&arena, expectedConnectionsListLength);
+	taskList = amalloc(&arena, taskListSize);
+	monitorList = amalloc(&arena, monitorListSize);
+	retryPacketsList = amalloc(&arena, retryPacketsListSize);
+	intermediateBufferList = amalloc(&arena, intermediateBufferListSize);
+	expectedConnectionsList = amalloc(&arena, expectedConnectionsListSize);
 
 	monitorAddr = amalloc(&arena, addrLen);
 	emptyAddr = amalloc(&arena, addrLen);

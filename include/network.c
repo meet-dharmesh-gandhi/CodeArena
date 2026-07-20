@@ -2,7 +2,11 @@
 #include "constants.h"
 #include "print.h"
 #include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <net/if_arp.h>
 #include <netdb.h>
+#include <netpacket/packet.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
@@ -173,4 +177,25 @@ void set_broadcast_addr(const char *port_number, struct sockaddr_in *addr) {
 	addr->sin_addr.s_addr = inet_addr("255.255.255.255");
 	addr->sin_port = htons(atoi(port_number));
 	addr->sin_family = AF_INET;
+}
+
+struct ifaddrs *getInterface(struct ifaddrs *req_ifa) {
+	struct ifaddrs *ifs = NULL;
+	struct ifaddrs *ifa = NULL;
+
+	if (getifaddrs(&ifs) < 0) {
+		printc(RED, "getInterface", "Error while getting addrs");
+		return NULL;
+	}
+
+	for (ifa = ifs; ifa != NULL; ifa = ifa->ifa_next) {
+		if (ifa->ifa_addr != NULL && ifa->ifa_addr->sa_family == AF_INET &&
+			ifa->ifa_flags & IFF_UP && !(ifa->ifa_flags & IFF_LOOPBACK)) {
+			memcpy(req_ifa, ifa, sizeof(struct ifaddrs));
+			break;
+		}
+	}
+
+	freeifaddrs(ifs);
+	return req_ifa;
 }

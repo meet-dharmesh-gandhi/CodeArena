@@ -10,4 +10,6 @@ done
 
 echo "Compiling gateway"
 
-./node/runGateway.sh
+echo "Done"
+
+# ./node/runGateway.sh

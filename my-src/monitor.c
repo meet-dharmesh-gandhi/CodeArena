@@ -5,11 +5,14 @@ int UID;
 Arena arena;
 
 struct NodeDetail *nodeList;
-const int nodeListLength = sizeof(struct NodeDetail) * MONITOR_CAPACITY;
+const int nodeListLength = MONITOR_CAPACITY;
+const int nodeListSize = sizeof(struct NodeDetail) * MONITOR_CAPACITY;
 struct MonitorRecord *monitorList;
-const int monitorListLength = sizeof(struct MonitorRecord) * MONITOR_CAPACITY;
+const int monitorListLength = MONITOR_CAPACITY;
+const int monitorListSize = sizeof(struct MonitorRecord) * MONITOR_CAPACITY;
 struct ExpectedConnection *expectedConnectionsList;
-const int expectedConnectionsListLength =
+const int expectedConnectionsListLength = MONITOR_CAPACITY;
+const int expectedConnectionsListSize =
 	sizeof(struct ExpectedConnection) * MONITOR_CAPACITY;
 
 int discover_fd, find_fd, hb_fd, role_fd, monitor_fd, timer_fd;
@@ -20,6 +23,7 @@ const int fdBufSize = sizeof(uint8_t) * LARGEST_PACKET;
 struct sockaddr_in *addr;
 struct sockaddr_in *emptyAddr;
 struct sockaddr_in *broadcastAddr;
+struct sockaddr_in *selfAddr;
 const int addrLen = sizeof(struct sockaddr_in);
 
 struct generic_packet *gp;
@@ -86,22 +90,30 @@ int main(int argc, char const *argv[]) {
 
 	arena = createArena(ARENA_SIZE);
 
-	nodeList = amalloc(&arena, nodeListLength);
-	monitorList = amalloc(&arena, monitorListLength);
-	expectedConnectionsList = amalloc(&arena, expectedConnectionsListLength);
+	nodeList = amalloc(&arena, nodeListSize);
+	memset(nodeList, 0, nodeListSize);
+	monitorList = amalloc(&arena, monitorListSize);
+	memset(monitorList, 0, monitorListSize);
+	expectedConnectionsList = amalloc(&arena, expectedConnectionsListSize);
+	memset(expectedConnectionsList, 0, expectedConnectionsListSize);
 
 	fd_buf = amalloc(&arena, fdBufSize);
 
 	addr = amalloc(&arena, addrLen);
 	emptyAddr = amalloc(&arena, addrLen);
 	broadcastAddr = amalloc(&arena, addrLen);
-	set_broadcast_addr(DISCOVER_PORT, broadcastAddr);
+	selfAddr = amalloc(&arena, addrLen);
+
+	set_broadcast_addr(HEARTBEAT_PORT, broadcastAddr);
+	struct ifaddrs *ifa = amalloc(&arena, sizeof(struct ifaddrs));
+	getInterface(ifa);
+	memcpy(selfAddr, ifa->ifa_addr, addrLen);
+	printc(IMP, "monitor", "My address: %s\n", getPrintableIP(selfAddr));
 
 	discover_fd = getNewSocket(DISCOVER_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
 	find_fd = getNewSocket(FIND_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
-	hb_fd = getNewSocket(FIND_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
-	role_fd = getNewSocket(FIND_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
-	monitor_fd = getNewSocket(DISCOVER_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
+	hb_fd = getNewSocket(HEARTBEAT_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
+	role_fd = getNewSocket(ROLE_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
 
 	timer_fd = getNewTimerFD(CLOCK_MONOTONIC, HEARTBEAT_INTERVAL,
 							 HEARTBEAT_INTERVAL, 1);
@@ -147,7 +159,7 @@ int main(int argc, char const *argv[]) {
 
 	printc(INFO, "monitor", "Event loop starting\n");
 
-	startLoop(MAX_EVENTS, 5, discover_fd, find_fd_sd, hb_fd_sd, role_fd_sd,
+	startLoop(MAX_EVENTS, 5, discover_fd_sd, find_fd_sd, hb_fd_sd, role_fd_sd,
 			  timer_fd_sd);
 
 	printc(INFO, "monitor", "Event loop ending\n");
@@ -158,7 +170,6 @@ int main(int argc, char const *argv[]) {
 }
 
 void handle_discover_fd(struct socketDetails *sd) {
-	printc(INFO, "monitor - handle_discover_fd", "Some discovery packet\n");
 	while (1) {
 		int res =
 			getNextDGRAMPacket(sd->fd, fd_buf, fdBufSize, 0, addr, addrLen);
@@ -171,12 +182,23 @@ void handle_discover_fd(struct socketDetails *sd) {
 				memcpy(fmp, fd_buf, fmp_size);
 
 				for (int i = 0; i < nodeListLength; i++) {
+					printc(INFO, "monitor - handle_discover_fd",
+						   "Some discovery packet\n");
 					if (nodeList[i].filled == 0) {
 						nodeList[i].filled = 1;
 						memcpy(&nodeList[i].addr, addr, addrLen);
 						nodeList[i].lastShouted = getCurrTime();
+						nodeList[i].nodeType = -1;
+						nodeList[i].UID = -1;
 					}
 				}
+			} else {
+				int id = 0;
+				memcpy(&id, fd_buf, sizeof(int));
+				printc(RED, "monitor - handle_discover_fd",
+					   "Some unknown packet on the port: %d, got CA: %d, "
+					   "actual CA: %d\n",
+					   packet_type, id, PACKET_ID);
 			}
 		} else if (res != 2) {
 			break;
@@ -259,6 +281,9 @@ void handle_hb_fd(struct socketDetails *sd) {
 			} else if (packet_type == MONITOR_HEARTBEAT_PACKET) {
 				// received a heartbeat from a monitor
 				registerMonitorHeartbeat();
+			} else {
+				printc(RED, "monitor - handle_hb_fd",
+					   "Some unknown packet on the port: %d\n", packet_type);
 			}
 		} else if (res != 2) {
 			break;
@@ -345,8 +370,13 @@ void cleanUpNodes() {
 	for (int i = 0; i < nodeListLength; i++) {
 		if (nodeList[i].filled == 1 &&
 			getCurrTime() - nodeList[i].lastShouted > EXPIRE_PERIOD) {
-			printc(INFO, "monitor - cleanUpNodes", "Node expired: %s\n",
-				   getPrintableIP(&nodeList[i].addr));
+			printc(INFO, "monitor - cleanUpNodes",
+				   "Node expired: %s, l: %d, r: %d, diff: %d, expire: %d, node "
+				   "UID: %d, type: %d, filled: %d\n",
+				   getPrintableIP(&nodeList[i].addr), getCurrTime(),
+				   nodeList[i].lastShouted,
+				   getCurrTime() - nodeList[i].lastShouted, EXPIRE_PERIOD,
+				   nodeList[i].UID, nodeList[i].nodeType, nodeList[i].filled);
 			nodeList[i].filled = 0;
 		}
 	}
@@ -675,6 +705,13 @@ void sendHeartbeat() {
 
 	// broadcast the heartbeat
 	sendto(hb_fd, mhb, mhb_size, 0, broadcastAddr, addrLen);
+
+	// send hearbeat to all nodes
+	for (int i = 0; i < nodeListLength; i++) {
+		if (nodeList[i].filled == 1) {
+			sendto(hb_fd, mhb, mhb_size, 0, &nodeList[i].addr, addrLen);
+		}
+	}
 }
 
 /**
@@ -707,14 +744,18 @@ int getTotalNodes(int nodeType) {
  * Modifies the monitor in the monitor list if it is present
  */
 void registerMonitorHeartbeat() {
+	// copy to mhb
+	memcpy(mhb, fd_buf, hb_size);
+
 	int emptyNode = isMonitorFull();
 
 	int nodeInd = findMonitor(addr);
 
 	if (nodeInd == NO && emptyNode != YES) {
 		// new monitor
-		printc(IMP, "assigner - registerMonitorHeartbeat", "New monitor: %s\n",
+		printc(IMP, "monitor - registerMonitorHeartbeat", "New monitor: %s\n",
 			   getPrintableIP(addr));
+
 		monitorList[emptyNode].filled = 1;
 		monitorList[emptyNode].UID = mhb->UID;
 		memcpy(&monitorList[emptyNode].addr, addr, addrLen);
@@ -728,7 +769,7 @@ void registerMonitorHeartbeat() {
 		monitorList[emptyNode].lastShouted = getCurrTime();
 	} else if (nodeInd != NO) {
 		// existing monitor
-		printc(IMP, "assigner - registerMonitorHeartbeat",
+		printc(IMP, "monitor - registerMonitorHeartbeat",
 			   "Existing monitor: %s\n", getPrintableIP(addr));
 		monitorList[nodeInd].min_load_assigner = mhb->min_load_assigner;
 		monitorList[nodeInd].min_load_worker = mhb->min_load_worker;
@@ -780,13 +821,16 @@ int isMonitorFull() {
  * Modifies the node in the node list if it is present
  */
 void registerNodeHeartbeat() {
+	// copy to hp
+	memcpy(hb, fd_buf, hb_size);
+
 	int emptyNode = isFull();
 
 	int nodeInd = findNode(addr);
 
 	if (nodeInd == NO && emptyNode != YES) {
 		// new node
-		printc(IMP, "assigner - registerNodeHeartbeat", "New node: %s\n",
+		printc(IMP, "monitor - registerNodeHeartbeat", "New node: %s\n",
 			   getPrintableIP(addr));
 		nodeList[emptyNode].filled = 1;
 		nodeList[emptyNode].nodeType = hb->node_type;
@@ -796,7 +840,7 @@ void registerNodeHeartbeat() {
 		memcpy(&nodeList[emptyNode].addr, addr, addrLen);
 	} else if (nodeInd != NO) {
 		// existing node
-		printc(IMP, "assigner - registerNodeHeartbeat", "Existing node: %s\n",
+		printc(IMP, "monitor - registerNodeHeartbeat", "Existing node: %s\n",
 			   getPrintableIP(addr));
 		nodeList[nodeInd].load = hb->load;
 		nodeList[nodeInd].lastShouted = getCurrTime();
