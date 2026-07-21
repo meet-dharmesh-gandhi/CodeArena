@@ -115,8 +115,8 @@ int main(int argc, char const *argv[]) {
 	hb_fd = getNewSocket(HEARTBEAT_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
 	role_fd = getNewSocket(ROLE_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
 
-	timer_fd = getNewTimerFD(CLOCK_MONOTONIC, HEARTBEAT_INTERVAL,
-							 HEARTBEAT_INTERVAL, 1);
+	timer_fd =
+		getNewTimerFD(CLOCK_MONOTONIC, EXPIRE_PERIOD, HEARTBEAT_INTERVAL, 1);
 
 	gp = amalloc(&arena, gp_size);
 	fnp = amalloc(&arena, fnp_size);
@@ -191,6 +191,8 @@ void handle_discover_fd(struct socketDetails *sd) {
 						nodeList[i].nodeType = -1;
 						nodeList[i].UID = -1;
 					}
+
+					sendHeartbeat();
 				}
 			} else {
 				int id = 0;
@@ -367,8 +369,8 @@ void handle_find_fd(struct socketDetails *sd) {
 void cleanUpNodes() {
 	for (int i = 0; i < nodeListLength; i++) {
 		if (nodeList[i].filled == 1 &&
-			getCurrTime() - nodeList[i].lastShouted > EXPIRE_PERIOD) {
-			printc(INFO, "monitor - cleanUpNodes",
+			(getCurrTime() - nodeList[i].lastShouted) > (long)(EXPIRE_PERIOD)) {
+			printc(IMP, "monitor - cleanUpNodes",
 				   "Node expired: %s, l: %d, r: %d, diff: %d, expire: %d, node "
 				   "UID: %d, type: %d, filled: %d\n",
 				   getPrintableIP(&nodeList[i].addr), getCurrTime(),
@@ -376,6 +378,9 @@ void cleanUpNodes() {
 				   getCurrTime() - nodeList[i].lastShouted, EXPIRE_PERIOD,
 				   nodeList[i].UID, nodeList[i].nodeType, nodeList[i].filled);
 			nodeList[i].filled = 0;
+		} else if (nodeList[i].filled == 1) {
+			printc(INFO, "monitor - cleanupNodes", "Time left: %ld\n",
+				   getCurrTime() - nodeList[i].lastShouted);
 		}
 	}
 
@@ -472,7 +477,7 @@ void sendRolePackets() {
 	}
 
 	// then check for monitors
-	if (demotionExpectedMonitors < monitors) {
+	if (demotionExpectedMonitors < monitors && monitors > 0) {
 		// too many monitors
 		printc(IMP, "monitor - sendRolePackets", "Demoting monitors: %d\n",
 			   monitors - demotionExpectedMonitors);
@@ -480,7 +485,7 @@ void sendRolePackets() {
 	}
 
 	// check for assigners
-	if (demotionExpectedAssigners < assigners) {
+	if (demotionExpectedAssigners < assigners && assigners > 0) {
 		// too many assigners
 		printc(IMP, "monitor - sendRolePackets", "Demoting assigners: %d\n",
 			   assigners - demotionExpectedAssigners);
@@ -488,7 +493,7 @@ void sendRolePackets() {
 	}
 
 	// finally check for workers
-	if (demotionExpectedWorkers < workers) {
+	if (demotionExpectedWorkers < workers && assigners > 0) {
 		// too many workers
 		printc(IMP, "monitor - sendRolePackets", "Demoting workers: %d\n",
 			   workers - demotionExpectedWorkers);
@@ -602,6 +607,8 @@ void deliverPromotePacket(int promoted_node_type, int target_node_type,
 	pp->promoted_node_type = promoted_node_type;
 	pp->target_node_type = target_node_type;
 
+	given_addr->sin_port = htons(atoi(ROLE_PORT));
+
 	sendto(role_fd, pp, pp_size, 0, given_addr, addrLen);
 }
 
@@ -616,6 +623,8 @@ void deliverDemotePacket(int demoted_node_type, int nodes_to_demote,
 	dp->UID = UID;
 	dp->nodes_to_demote = nodes_to_demote;
 	dp->demoted_node_type = demoted_node_type;
+
+	given_addr->sin_port = htons(atoi(ROLE_PORT));
 
 	sendto(role_fd, dp, dp_size, 0, given_addr, addrLen);
 }
@@ -639,6 +648,9 @@ int getGlobalNodes(int nodeType) {
 		if (monitorList[i].filled == 1) {
 			switch (nodeType) {
 			case GATEWAY_NODE:
+				printc(RED, "monitor - getGlobalNodes",
+					   "Node with gateway: %s\n",
+					   getPrintableIP(&monitorList[i].addr));
 				cnt += monitorList[i].gateways;
 				break;
 			case ASSIGNER_NODE:
@@ -765,17 +777,21 @@ void registerMonitorHeartbeat() {
 		monitorList[emptyNode].workers = mhb->workers;
 		monitorList[emptyNode].totalNodes = mhb->totalNodes;
 		monitorList[emptyNode].lastShouted = getCurrTime();
+		printc(IMP, "monitor - registerMonitorHeartbeat", "New monitor: %s\n",
+			   getPrintableIP(addr), mhb->assigners, mhb->gateways,
+			   mhb->workers, mhb->totalNodes);
 	} else if (nodeInd != NO) {
 		// existing monitor
 		printc(IMP, "monitor - registerMonitorHeartbeat",
-			   "Existing monitor: %s\n", getPrintableIP(addr));
+			   "Existing monitor: %s, %d %d %d %d\n", getPrintableIP(addr),
+			   mhb->assigners, mhb->gateways, mhb->workers, mhb->totalNodes);
 		monitorList[nodeInd].min_load_assigner = mhb->min_load_assigner;
 		monitorList[nodeInd].min_load_worker = mhb->min_load_worker;
-		monitorList[emptyNode].gateway_load = mhb->gateway_load;
-		monitorList[emptyNode].assigners = mhb->assigners;
-		monitorList[emptyNode].gateways = mhb->gateways;
-		monitorList[emptyNode].workers = mhb->workers;
-		monitorList[emptyNode].totalNodes = mhb->totalNodes;
+		monitorList[nodeInd].gateway_load = mhb->gateway_load;
+		monitorList[nodeInd].assigners = mhb->assigners;
+		monitorList[nodeInd].gateways = mhb->gateways;
+		monitorList[nodeInd].workers = mhb->workers;
+		monitorList[nodeInd].totalNodes = mhb->totalNodes;
 		monitorList[nodeInd].lastShouted = getCurrTime();
 	}
 }
@@ -789,6 +805,16 @@ void registerMonitorHeartbeat() {
 int findMonitor(struct sockaddr_in *given_addr) {
 	if (given_addr == NULL) {
 		given_addr = addr;
+	}
+
+	for (int i = 0; i < monitorListLength; i++) {
+		if (monitorList[i].filled == 1) {
+			printc(IMP, "monitor - findMonitor",
+				   "addr: %s, counts: %d %d %d %d\n",
+				   getPrintableIP(&monitorList[i].addr),
+				   monitorList[i].assigners, monitorList[i].gateways,
+				   monitorList[i].workers, monitorList[i].totalNodes);
+		}
 	}
 
 	for (int i = 0; i < monitorListLength; i++) {

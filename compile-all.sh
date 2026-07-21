@@ -10,6 +10,10 @@ done
 
 echo "Compiling gateway"
 
+cd ./node
+
+node-gyp rebuild
+
 echo "Done"
 
 # ./node/runGateway.sh

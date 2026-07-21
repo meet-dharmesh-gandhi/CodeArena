@@ -4,12 +4,8 @@
 #include <stdio.h>
 #include <unistd.h>
 
-const char *paths[] = {
-	"/home/Lab208/Desktop/CodeArena/my-src/monitor",
-	"/home/Lab208/Desktop/CodeArena/my-src/assigner",
-	"/home/Lab208/Desktop/CodeArena/my-src/worker",
-	"/home/Lab208/Desktop/CodeArena/my-src/empty",
-	"cd /home/Lab208/Desktop/CodeArena/my-src/node && npm run dev"};
+char *paths[] = {"cd ./node && npm run dev", "./monitor", "./assigner",
+				 "./worker", "./empty"};
 
 void replace(char *str, int isPath);
 void change(char *str);
@@ -24,8 +20,11 @@ void morph(int nodeType, int morphType) {
 		return;
 	}
 
+	printc(INFO, "morph", "nodeType: %d, path: %s\n", nodeType,
+		   paths[nodeType]);
+
 	if (morphType == 0) {
-		replace(paths[nodeType], nodeType == GATEWAY_NODE ? 1 : 0);
+		replace(paths[nodeType], nodeType == GATEWAY_NODE ? 0 : 1);
 	} else {
 		change(paths[nodeType]);
 	}
@@ -34,9 +33,11 @@ void morph(int nodeType, int morphType) {
 void replace(char *str, int isPath) {
 	if (isPath == 1) {
 		char *args[] = {str, NULL};
+		printc(INFO, "morph - replace", "Replacing with: %s\n", str);
 		execvp(args[0], args);
 	} else {
 		char *args[] = {"sh", "-c", str, NULL};
+		printc(INFO, "morph - replace", "Replacing with: %s\n", str);
 		execvp(args[0], args);
 	}
 
@@ -47,6 +48,7 @@ void replace(char *str, int isPath) {
 void change(char *str) {
 	pid_t pid = fork();
 
+	printc(INFO, "morph - change", "Changing with: %s\n", str);
 	if (pid < 0) {
 		printc(RED, "morph - change", "Fork failed\n");
 		perror("fork");

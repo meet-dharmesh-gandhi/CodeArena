@@ -52,7 +52,7 @@ struct sockaddr_in *emptyAddr;
 struct sockaddr_in *addr;
 const int addrLen = sizeof(struct sockaddr_in);
 
-int monitor_last_shouted;
+time_t monitor_last_shouted;
 
 int discover_fd, find_fd, timer_fd, task_fd, hb_fd, accept_assigner_fd;
 
@@ -300,14 +300,17 @@ void handle_hb_fd(uv_poll_t *handle, int status, int events) {
 		int res = getNextDGRAMPacket(hb_fd, hp, hp_size, 0, addr, addrLen);
 
 		if (res == EXIT_SUCCESS) {
+			time_t currTime = getCurrTime();
 			if (memcmp(addr, monitorAddr, addrLen) == 0) {
-				printc(RED, "Gateway - handle_hb_fd", "Existing monitor\n");
-				monitor_last_shouted = getCurrTime();
-			} else if (getCurrTime() - monitor_last_shouted > EXPIRE_PERIOD) {
-				// this is impossible to happen since a discovery packet is
-				// never sent after a monitor starts sending heartbeats
+				printc(INFO, "Gateway - handle_hb_fd",
+					   "Existing monitor, %ld\n", currTime);
+				monitor_last_shouted = currTime;
+			} else if (currTime - monitor_last_shouted > EXPIRE_PERIOD ||
+					   monitor_last_shouted == -1) {
 				printc(IMP, "gateway - handle_hb_fd",
-					   "New monitor heartbeat received?!\n");
+					   "New monitor heartbeat received?! %ld\n", currTime);
+				monitor_last_shouted = currTime;
+				memcpy(monitorAddr, addr, addrLen);
 			}
 		} else if (res != 2) {
 			break;
@@ -590,13 +593,13 @@ void handle_assigner_fd(uv_poll_t *handle, int status, int events) {
 }
 
 napi_value Init(napi_env env, napi_callback_info info) {
-	printc(INFO, "gateway - Init", "message\n");
+	printc(INFO, "Gateway - Init", "Init started\n");
 	napi_status status;
 	size_t argc = 1;
 	napi_value args[argc];
 
 	status = napi_get_cb_info(env, info, &argc, args, NULL, NULL);
-	if (status != napi_ok || argc < 2) {
+	if (status != napi_ok || argc < 1) {
 		printc(RED, "Gateway - Init", "Could not get args\n");
 		printNapiError(env, "Init");
 		return napiUndefined(env);
@@ -727,7 +730,8 @@ napi_value OnDrain(napi_env env, napi_callback_info info) {
 // createTask(cb, close_cb, message_cb);
 napi_value CreateTask(napi_env env, napi_callback_info info) {
 	if (ended == 1) {
-		return;
+		printc(RED, "Gateway - CreateTask", "Task list full\n");
+		return napiInt32(env, NO);
 	}
 
 	printc(INFO, "gateway - CreateTask", "task created\n");
@@ -780,6 +784,8 @@ napi_value CreateTask(napi_env env, napi_callback_info info) {
 // -------------------- UTILS --------------------
 
 void sendDiscoveryPacket() {
+	printc(INFO, "Gateway - sendDiscoveryPacket",
+		   "Sending discovery packet, %d\n", monitor_last_shouted > 0 ? 1 : 0);
 	if (monitor_last_shouted > 0) {
 		return;
 	}
@@ -814,16 +820,24 @@ struct Task *addTask(napi_env env, napi_value cb, napi_value close_cb,
 }
 
 void checkMonitor() {
-	if (getCurrTime() - monitor_last_shouted > EXPIRE_PERIOD && ended == 0) {
+	if (getCurrTime() - monitor_last_shouted > EXPIRE_PERIOD && ended == 0 &&
+		monitor_last_shouted > 0) {
 		printc(
 			ERR, "gateway - checkMonitor",
 			"Becoming an empty node, monitor did not reply for a long time\n");
 		for (int i = 0; i < taskListLength; i++) {
-			if (taskList[i].filled == 1) {
+			if (taskList[i].filled == 1 && taskList[i].env != NULL) {
+				printc(INFO, "Gateway - checkMonitor",
+					   "Calling end function\n");
+				napi_value global = getNapiGlobal(taskList[i].env);
+				printc(IMP, "Gateway - checkMonitor", "is global: %d\n",
+					   global == NULL);
 				napi_call_function(taskList[i].env,
 								   getNapiGlobal(taskList[i].env), end_cb, 0,
 								   NULL, NULL);
+				printc(INFO, "Gateway - checkMonitor", "Called end function\n");
 				ended = 1;
+				printc(INFO, "Gateway - checkMonitor", "Called end function\n");
 				return;
 			}
 		}
@@ -847,7 +861,7 @@ void sendHeartbeat() {
 	hp->UID = UID;
 	printc(INFO, "gateway - sendHeartbeat", "Almost done\n");
 	hp->load = getNumberOfTasks();
-	printc(RED, "Gateway - sendHeartbeat", "Sending heartbeat to %s\n",
+	printc(INFO, "Gateway - sendHeartbeat", "Sending heartbeat to %s\n",
 		   getPrintableIP(monitorAddr));
 	sendto(hb_fd, hp, hp_size, 0, monitorAddr, addrLen);
 }

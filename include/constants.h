@@ -50,7 +50,7 @@ enum NodeTypes {
 #define MAX_UID 10000
 
 #define HEARTBEAT_INTERVAL 10 // in milliseconds
-#define MAX_MISSES 3
+#define MAX_MISSES 10
 #define BUFFER_SIZE 1024
 #define MONITOR_CAPACITY 5
 #define ASSIGNER_CAPACITY 5

@@ -19,6 +19,7 @@ console.log("Server started");
 const wss = new ws.WebSocketServer({ server });
 
 cG.init(() => {
+	console.log("init called");
 	setInterval(() => {
 		if (wss.clients.size == 0) {
 			wss.close();
@@ -63,6 +64,10 @@ wss.on("connection", (ws) => {
 			return false;
 		},
 	);
+	if (taskID < 0) {
+		ws.close(404);
+	}
+
 	tasks[taskID] = ws;
 	console.log("connection");
 
