@@ -219,8 +219,6 @@ void handle_timer_fd(struct socketDetails *sd) {
 	sendRolePackets();
 }
 
-// TODO Workers and assigners should not take in more tasks, but should first
-// complete their tasks
 void handle_role_fd(struct socketDetails *sd) {
 	while (1) {
 		int res =

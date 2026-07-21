@@ -28,6 +28,8 @@ struct sockaddr_in *emptyAddr;
 struct sockaddr_in *broadcastAddr;
 const int addrLen = sizeof(struct sockaddr_in);
 
+int roleChanged = 0;
+
 int task_fd, find_fd, hb_fd, role_fd, discover_fd, gateway_fd, timer_fd,
 	accept_worker_fd;
 
@@ -210,10 +212,12 @@ void handle_role_fd(struct socketDetails *sd) {
 
 			if (packet_type == PROMOTE_PACKET) {
 				printc(IMP, "assigner - rolefd", "recved promote packet\n");
+				roleChanged = 1;
 				// this should not happen, no action defined yet
 			} else if (packet_type == DEMOTE_PACKET) {
 				printc(IMP, "assigner - rolefd", "recved demote packet\n");
 				morph(EMPTY_NODE);
+				roleChanged = 1;
 			}
 		} else if (res != 2) {
 			break;
@@ -250,7 +254,13 @@ void handle_accept_worker_fd(struct socketDetails *sd) {
 					continue;
 				}
 			} else {
+				// if the role is changed, close the socket
+				if (roleChanged == 1) {
+					close(res);
+				}
+
 				// check if the connection was expected
+				int expected = 0;
 				for (int i = 0; i < expectedConnectionsListLength; i++) {
 					if (expectedConnectionsList[i].filled == 1 &&
 						memcmp(&expectedConnectionsList[i].addr, addr,
@@ -266,8 +276,13 @@ void handle_accept_worker_fd(struct socketDetails *sd) {
 							}
 						}
 						expectedConnectionsList[i].filled = 0;
+						expected = 1;
 						break;
 					}
+				}
+
+				if (expected == 0) {
+					close(res);
 				}
 			}
 		}
@@ -290,6 +305,8 @@ void handle_hb_fd(struct socketDetails *sd) {
 				// store this monitor's heartbeat
 				addMonitorNode();
 			}
+		} else if (res != 2) {
+			break;
 		}
 	}
 }
@@ -623,6 +640,7 @@ void handle_worker_fd(struct socketDetails *sd) {
 				int done = getPacketData(sd->fd, ib->buf, &ib->buf_ptr,
 										 (uint8_t *)ctp, ctp_size);
 
+				// TODO handle this blunder!
 				if (done == YES) {
 					close(sd->fd);
 					deleteFDInEpoll(sd->fd);
@@ -771,6 +789,10 @@ void cleanupMonitors() {
  * Sends current heartbeat
  */
 void sendHeartbeat() {
+	if (roleChanged == 1) {
+		return;
+	}
+
 	hb->packet_ID = PACKET_ID;
 	hb->packet_type = HEARTBEAT_PACKET;
 	hb->node_type = ASSIGNER_NODE;
@@ -884,6 +906,10 @@ void addMonitorNode() {
  * get lowest loaded worker node address
  */
 int processTaskPacket() {
+	if (roleChanged == 1) {
+		return NO;
+	}
+
 	if (isFull() == YES) {
 		sendCancelTaskPacket(task_fd, tp->taskID);
 		return NO;
@@ -1034,6 +1060,18 @@ int removeTask(int taskID) {
 	if (taskList[taskID].filled == 1) {
 		taskList[taskID].filled = 0;
 		return EXIT_SUCCESS;
+	}
+
+	// check if all tasks are finished
+	for (int i = 0; i < taskListLength; i++) {
+		if (taskList[i].filled == 1) {
+			return EXIT_FAILURE;
+		}
+	}
+
+	// if it reaches here, it implies that there are no tasks
+	if (roleChanged == 1) {
+		exit(EXIT_SUCCESS);
 	}
 
 	return EXIT_FAILURE;

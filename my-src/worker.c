@@ -31,6 +31,8 @@ struct sockaddr_in *broadcastAddr;
 struct sockaddr_in *addr;
 const int addrLen = sizeof(struct sockaddr_in);
 
+int roleChanged = 0;
+
 struct generic_packet *gp;
 const int gp_size = sizeof(struct generic_packet);
 struct task_packet *tp;
@@ -64,6 +66,7 @@ void cleanUpTasks();
 void sendHeartbeat();
 int getLoad();
 void sendDiscoveryPacket();
+void checkTasksCompleted();
 int removeFromTaskList(int taskID);
 int addToTaskList(int taskID, int assigner_fd);
 void sendCancelTaskTCPPacket(int taskID, int fd);
@@ -236,6 +239,13 @@ void handle_container(struct socketDetails *sd) {
 		// send a task over packet
 		printc(INFO, "worker - handle_container", "Connected ended\n");
 		sendTaskOverPacket(sd->fd);
+		for (int i = 0; i < taskListLength; i++) {
+			if (taskList[i].filled == 1 && taskList[i].bottom_fd == sd->fd) {
+				taskList[i].filled = 0;
+			}
+		}
+
+		checkTasksCompleted();
 	} else if (sd->events & EPOLLIN) {
 		// incoming data, forward to assigner
 		while (1) {
@@ -321,10 +331,12 @@ void handle_role_fd(struct socketDetails *sd) {
 				printc(INFO, "worker - handle_role_fd",
 					   "Promoting to assigner\n");
 				morph(ASSIGNER_NODE);
+				roleChanged = 1;
 			} else if (packet_type == DEMOTE_PACKET) {
 				printc(INFO, "worker - handle_role_fd",
 					   "Demoting to empty node\n");
 				morph(EMPTY_NODE);
+				roleChanged = 1;
 			}
 		} else if (res != 2) {
 			break;
@@ -417,6 +429,8 @@ void handle_assigner_fd(struct socketDetails *sd) {
 				taskList[i].filled = 0;
 			}
 		}
+
+		checkTasksCompleted();
 	} else if (sd->events & EPOLLIN) {
 		while (1) {
 			int packet_type = getPacketType(sd->fd, ib->buf, &ib->buf_ptr);
@@ -450,6 +464,10 @@ void handle_assigner_fd(struct socketDetails *sd) {
 										 (uint8_t *)tp, tp_size);
 
 				if (done == YES) {
+					if (roleChanged == 1) {
+						continue;
+					}
+
 					printc(INFO, "worker - handle_assigner_fd", "Task: %d\n",
 						   tp->taskID);
 					if (addToTaskList(tp->taskID, sd->fd) == NO) {
@@ -507,6 +525,11 @@ void handle_task_fd(struct socketDetails *sd) {
 					   tp->taskID);
 				// copy to tp
 				memcpy(tp, fd_buf, tp_size);
+
+				if (roleChanged == 1) {
+					printc(IMP, "worker - handle_task_fd", "Ignored task\n");
+					continue;
+				}
 
 				// check if the worker is full
 				if (addToTaskList(tp->taskID, sd->fd) == NO) {
@@ -676,6 +699,10 @@ void cleanUpTasks() {
  * Send a heartbeat
  */
 void sendHeartbeat() {
+	if (roleChanged == 1) {
+		return;
+	}
+
 	if (getCurrTime() - *monitor_last_shouted > EXPIRE_PERIOD) {
 		memcpy(monitorAddr, emptyAddr, addrLen);
 	}
@@ -722,17 +749,18 @@ void sendDiscoveryPacket() {
 	sendto(discover_fd, fmp, fmp_size, 0, broadcastAddr, addrLen);
 }
 
-/**
- * This function removes a task from the task list
- * Returns YES if removal was successful
- * Returns NO if removal was not successful
- */
-int removeFromTaskList(int taskID) {
-	if (taskList[taskID].filled == 0) {
-		return NO;
-	}
+void checkTasksCompleted() {
+	if (roleChanged == 1) {
+		// check if all tasks are complete
+		for (int i = 0; i < taskListLength; i++) {
+			if (taskList[i].filled == 1) {
+				return;
+			}
+		}
 
-	taskList[taskID].filled = 1;
+		// all tasks are complete
+		exit(EXIT_SUCCESS);
+	}
 }
 
 /**

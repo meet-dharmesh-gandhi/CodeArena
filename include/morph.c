@@ -11,6 +11,7 @@
 #define GATEWAY_PATH "cd ../my-src/node && npm run dev"
 
 void replace(char *str, int isPath);
+void change(char *str);
 
 void morph(int nodeType) {
 	switch (nodeType) {
@@ -18,10 +19,10 @@ void morph(int nodeType) {
 		replace(MONITOR_PATH, 1);
 		break;
 	case ASSIGNER_NODE:
-		replace(ASSIGNER_PATH, 1);
+		change(ASSIGNER_PATH);
 		break;
 	case WORKER_NODE:
-		replace(WORKER_PATH, 1);
+		change(WORKER_PATH);
 		break;
 	case EMPTY_NODE:
 		replace(EMPTY_NODE_PATH, 1);
@@ -46,4 +47,16 @@ void replace(char *str, int isPath) {
 
 	printc(RED, "morphToMonitor", "Unable to morph to %d\n", str);
 	perror("morph");
+}
+
+void change(char *str) {
+	pid_t pid = fork();
+
+	if (pid < 0) {
+		printc(RED, "morph - change", "Fork failed\n");
+		perror("fork");
+	} else if (pid == 0) {
+		char *args[] = {str, NULL};
+		execvp(args[0], args);
+	}
 }
