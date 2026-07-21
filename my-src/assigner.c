@@ -640,14 +640,44 @@ void handle_worker_fd(struct socketDetails *sd) {
 				int done = getPacketData(sd->fd, ib->buf, &ib->buf_ptr,
 										 (uint8_t *)ctp, ctp_size);
 
-				// TODO handle this blunder!
 				if (done == YES) {
-					close(sd->fd);
-					deleteFDInEpoll(sd->fd);
-					removeTask(ctp->taskID);
-					sendTaskOverPacket(taskList[ctp->taskID].top_fd,
-									   ctp->taskID);
-					ib->taken = 0;
+					if (taskList[ctp->taskID].bottom_fd == -1) {
+						// asked for a task
+						// ask for another worker to a monitor
+						struct sockaddr_in *monitorAddr = getMinWorkerMonitor();
+						if (monitorAddr == NULL) {
+							// no monitor assigned yet...
+							continue;
+						}
+
+						// sent or not is irrelevant since retry will happen
+						// anyways
+						sendFindNodePacket(monitorAddr, 0, 1, WORKER_NODE);
+					} else {
+						removeTask(ctp->taskID);
+						sendTaskOverPacket(taskList[ctp->taskID].top_fd,
+										   ctp->taskID);
+
+						int isPresent = 0;
+						for (int i = 0; i < taskListLength; i++) {
+							if (taskList[i].filled == 1 && i != ctp->taskID &&
+								taskList[i].bottom_fd == sd->fd) {
+								// there is/are another task(s) handled by this
+								// worker
+								isPresent = 1;
+								break;
+							}
+						}
+
+						if (isPresent) {
+							continue;
+						}
+
+						// there is no other task handle by this worker
+						close(sd->fd);
+						deleteFDInEpoll(sd->fd);
+						ib->taken = 0;
+					}
 				} else if (done == ERROR || done == UNKNOWN) {
 					break;
 				}
