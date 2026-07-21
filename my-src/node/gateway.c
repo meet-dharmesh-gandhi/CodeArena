@@ -190,15 +190,18 @@ napi_value Start(napi_env env, napi_value exports) {
 					 UV_READABLE, handle_accept_assigner_fd,
 					 handle_accept_assigner_fd_close);
 
-	napi_value OnMessageFN, OnDrainFN, CreateTaskFN;
-	napi_create_function(env, "createTask", 10, CreateTask, NULL,
+	napi_value OnMessageFN, OnDrainFN, CreateTaskFN, InitFN;
+	napi_create_function(env, "createTask", 11, CreateTask, NULL,
 						 &CreateTaskFN);
-	napi_create_function(env, "onDrain", 10, OnDrain, NULL, &OnDrainFN);
+	napi_create_function(env, "onDrain", 8, OnDrain, NULL, &OnDrainFN);
 	napi_create_function(env, "onMessage", 10, OnMessage, NULL, &OnMessageFN);
+	napi_create_function(env, "init", 5, Init, NULL, &InitFN);
+	;
 
 	napi_set_named_property(env, exports, "createTasks", CreateTaskFN);
 	napi_set_named_property(env, exports, "onDrain", OnDrainFN);
 	napi_set_named_property(env, exports, "onMessage", OnMessageFN);
+	napi_set_named_property(env, exports, "init", InitFN);
 	napi_set_named_property(env, exports, "ok", napiBool(env, 1));
 
 	return exports;
