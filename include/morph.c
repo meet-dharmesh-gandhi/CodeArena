@@ -4,35 +4,30 @@
 #include <stdio.h>
 #include <unistd.h>
 
-#define MONITOR_PATH "../my-src/monitor"
-#define ASSIGNER_PATH "../my-src/assigner"
-#define WORKER_PATH "../my-src/worker"
-#define EMPTY_NODE_PATH "../my-src/empty"
-#define GATEWAY_PATH "cd ../my-src/node && npm run dev"
+const char *paths[] = {
+	"/home/Lab208/Desktop/CodeArena/my-src/monitor",
+	"/home/Lab208/Desktop/CodeArena/my-src/assigner",
+	"/home/Lab208/Desktop/CodeArena/my-src/worker",
+	"/home/Lab208/Desktop/CodeArena/my-src/empty",
+	"cd /home/Lab208/Desktop/CodeArena/my-src/node && npm run dev"};
 
 void replace(char *str, int isPath);
 void change(char *str);
 
-void morph(int nodeType) {
-	switch (nodeType) {
-	case MONITOR_NODE:
-		replace(MONITOR_PATH, 1);
-		break;
-	case ASSIGNER_NODE:
-		change(ASSIGNER_PATH);
-		break;
-	case WORKER_NODE:
-		change(WORKER_PATH);
-		break;
-	case EMPTY_NODE:
-		replace(EMPTY_NODE_PATH, 1);
-		break;
-	case GATEWAY_NODE:
-		replace(GATEWAY_PATH, 0);
-		break;
-	default:
-		printc(RED, "morph", "Invalid nodeType requested\n");
-		break;
+/**
+ * If morphType is 0 the process is replaced
+ * A child process is created otherwise
+ */
+void morph(int nodeType, int morphType) {
+	if (nodeType > 4 || nodeType < 0) {
+		printc(RED, "morph", "Invalid node type\n");
+		return;
+	}
+
+	if (morphType == 0) {
+		replace(paths[nodeType], nodeType == GATEWAY_NODE ? 1 : 0);
+	} else {
+		change(paths[nodeType]);
 	}
 }
 
@@ -45,7 +40,7 @@ void replace(char *str, int isPath) {
 		execvp(args[0], args);
 	}
 
-	printc(RED, "morphToMonitor", "Unable to morph to %d\n", str);
+	printc(RED, "morph - replace", "Unable to morph to %s\n", str);
 	perror("morph");
 }
 

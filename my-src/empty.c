@@ -119,7 +119,7 @@ void handle_role_timer_fd(struct socketDetails *sd) {
 	printc(INFO, "empty - handle_role_timer_fd", "Becoming monitor\n");
 
 	// now become a monitor
-	morph(MONITOR_NODE);
+	morph(MONITOR_NODE, 0);
 }
 
 void handle_timer_fd(struct socketDetails *sd) {
@@ -170,10 +170,10 @@ void handle_role_fd(struct socketDetails *sd) {
 				if (pp->target_node_type == ASSIGNER_NODE) {
 					printc(INFO, "empty - handle_role_fd",
 						   "Becoming assigner\n");
-					morph(ASSIGNER_NODE);
+					morph(ASSIGNER_NODE, 0);
 				} else if (pp->target_node_type == WORKER_NODE) {
 					printc(INFO, "empty - handle_role_fd", "Becoming worker\n");
-					morph(WORKER_NODE);
+					morph(WORKER_NODE, 0);
 				}
 			} else if (packet_type == DEMOTE_PACKET) {
 				printc(INFO, "empty - handle_role_fd", "Demote to what?\n");

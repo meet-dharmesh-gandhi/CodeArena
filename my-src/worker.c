@@ -330,12 +330,12 @@ void handle_role_fd(struct socketDetails *sd) {
 				pp->target_node_type == ASSIGNER_NODE) {
 				printc(INFO, "worker - handle_role_fd",
 					   "Promoting to assigner\n");
-				morph(ASSIGNER_NODE);
+				morph(ASSIGNER_NODE, 1);
 				roleChanged = 1;
 			} else if (packet_type == DEMOTE_PACKET) {
 				printc(INFO, "worker - handle_role_fd",
 					   "Demoting to empty node\n");
-				morph(EMPTY_NODE);
+				morph(EMPTY_NODE, 1);
 				roleChanged = 1;
 			}
 		} else if (res != 2) {

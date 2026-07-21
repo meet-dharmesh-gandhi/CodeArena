@@ -2,6 +2,7 @@ const dotenv = require("dotenv");
 const ws = require("ws");
 const http = require("http");
 const cG = require("./build/Release/gateway.node");
+const { exit } = require("process");
 
 const GATEWAY_CAPACITY = 20;
 const MAX_DATA_CAPACITY = 256;
@@ -16,6 +17,16 @@ const server = http.createServer((req, res) => {});
 console.log("Server started");
 
 const wss = new ws.WebSocketServer({ server });
+
+cG.init(() => {
+	setInterval(() => {
+		if (wss.clients.size == 0) {
+			wss.close();
+			server.close();
+			exit(0);
+		}
+	}, 1000);
+});
 
 console.log("wss created");
 

@@ -256,7 +256,7 @@ void handle_role_fd(struct socketDetails *sd) {
 						}
 					}
 				} else if (dp->demoted_node_type == MONITOR_NODE) {
-					morph(EMPTY_NODE);
+					morph(EMPTY_NODE, 0);
 				}
 			}
 		} else if (res != 2) {
@@ -435,7 +435,7 @@ void sendRolePackets() {
 	if (gateways < 1) {
 		printc(IMP, "monitor - sendRolePackets", "Becoming gateway\n");
 		// no gateway, become the gateway
-		morph(GATEWAY_NODE);
+		morph(GATEWAY_NODE, 0);
 	}
 
 	if (promotionExpectedAssigners > assigners) {

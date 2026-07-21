@@ -216,7 +216,7 @@ void handle_role_fd(struct socketDetails *sd) {
 				// this should not happen, no action defined yet
 			} else if (packet_type == DEMOTE_PACKET) {
 				printc(IMP, "assigner - rolefd", "recved demote packet\n");
-				morph(EMPTY_NODE);
+				morph(EMPTY_NODE, 1);
 				roleChanged = 1;
 			}
 		} else if (res != 2) {

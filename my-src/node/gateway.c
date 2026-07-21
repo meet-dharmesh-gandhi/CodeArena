@@ -72,6 +72,9 @@ const int hp_size = sizeof(struct heartbeat_packet);
 struct find_monitor_packet *fmp;
 const int fmp_size = sizeof(struct find_monitor_packet);
 
+napi_value end_cb;
+int ended;
+
 int garp();
 void handle_timer_fd_close(uv_handle_t *handle);
 void handle_timer_fd(uv_poll_t *handle, int status, int events);
@@ -83,6 +86,7 @@ void handle_assigner_fd_close(uv_handle_t *handle);
 void handle_find_fd_close(uv_handle_t *handle);
 void handle_find_fd(uv_poll_t *handle, int status, int events);
 void handle_assigner_fd(uv_poll_t *handle, int status, int events);
+napi_value Init(napi_env env, napi_callback_info info);
 napi_value OnMessage(napi_env env, napi_callback_info info);
 napi_value OnDrain(napi_env env, napi_callback_info info);
 napi_value CreateTask(napi_env env, napi_callback_info info);
@@ -115,19 +119,19 @@ napi_value napiInt32(napi_env env, int i);
 napi_value napiUndefined(napi_env env);
 napi_value napiPanic(napi_env env);
 
-napi_value Init(napi_env env, napi_value exports) {
+napi_value Start(napi_env env, napi_value exports) {
 	// if (garp() == NO) {
-	// 	printc(RED, "Gateway - Init", "garp failed\n");
+	// 	printc(RED, "Gateway - Start", "garp failed\n");
 	// 	napi_set_named_property(env, exports, "ok", napiBool(env, 0));
 	// 	return exports;
 	// }
 
-	printc(INFO, "INIT", "C code started running\n");
+	printc(INFO, "Start", "C code started running\n");
 
 	UID = randInt(-1, MAX_UID);
 
 	if (UID == -1) {
-		printc(RED, "Gateway - Init", "UID failed\n");
+		printc(RED, "Gateway - Start", "UID failed\n");
 		perror("getrandom");
 		napi_set_named_property(env, exports, "ok", napiBool(env, 0));
 		return exports;
@@ -144,6 +148,7 @@ napi_value Init(napi_env env, napi_value exports) {
 	addr = malloc(addrLen);
 
 	monitor_last_shouted = -1; // indicates the monitor was never found
+	ended = 0;
 
 	buf = malloc(buf_size);
 
@@ -199,7 +204,7 @@ napi_value Init(napi_env env, napi_value exports) {
 	return exports;
 }
 
-NAPI_MODULE(NODE_GYP_GATEWAY, Init);
+NAPI_MODULE(NODE_GYP_GATEWAY, Start);
 
 int garp() {
 	int sockfd;
@@ -267,7 +272,6 @@ void handle_timer_fd_close(uv_handle_t *handle) {}
 void handle_timer_fd(uv_poll_t *handle, int status, int events) {
 	printc(INFO, "gateway - handle_timer_fd", "timer expired\n");
 	readTimerFD(timer_fd);
-	printc(INFO, "gateway - handle_timer_fd", "Timer read\n");
 
 	// send heartbeat
 	sendHeartbeat();
@@ -582,6 +586,31 @@ void handle_assigner_fd(uv_poll_t *handle, int status, int events) {
 	}
 }
 
+napi_value Init(napi_env env, napi_callback_info info) {
+	printc(INFO, "gateway - Init", "message\n");
+	napi_status status;
+	size_t argc = 1;
+	napi_value args[argc];
+
+	status = napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+	if (status != napi_ok || argc < 2) {
+		printc(RED, "Gateway - Init", "Could not get args\n");
+		printNapiError(env, "Init");
+		return napiUndefined(env);
+	}
+
+	napi_valuetype value_type;
+	status = napi_typeof(env, args[0], &value_type);
+
+	if (status != napi_ok || value_type != napi_function) {
+		printc(RED, "Gateway - Init", "First argument not function\n");
+		return napiUndefined(env);
+	}
+
+	end_cb = args[0];
+	return napiUndefined(env);
+}
+
 napi_value OnMessage(napi_env env, napi_callback_info info) {
 	printc(INFO, "gateway - OnMessage", "message\n");
 	napi_status status;
@@ -694,6 +723,10 @@ napi_value OnDrain(napi_env env, napi_callback_info info) {
 
 // createTask(cb, close_cb, message_cb);
 napi_value CreateTask(napi_env env, napi_callback_info info) {
+	if (ended == 1) {
+		return;
+	}
+
 	printc(INFO, "gateway - CreateTask", "task created\n");
 	napi_status status;
 	size_t argc = 3;
@@ -778,15 +811,27 @@ struct Task *addTask(napi_env env, napi_value cb, napi_value close_cb,
 }
 
 void checkMonitor() {
-	if (getCurrTime() - monitor_last_shouted > EXPIRE_PERIOD) {
+	if (getCurrTime() - monitor_last_shouted > EXPIRE_PERIOD && ended == 0) {
 		printc(
 			ERR, "gateway - checkMonitor",
 			"Becoming an empty node, monitor did not reply for a long time\n");
-		morph(EMPTY_NODE);
+		for (int i = 0; i < taskListLength; i++) {
+			if (taskList[i].filled == 1) {
+				napi_call_function(taskList[i].env,
+								   getNapiGlobal(taskList[i].env), end_cb, 0,
+								   NULL, NULL);
+				ended = 1;
+				return;
+			}
+		}
 	}
 }
 
 void sendHeartbeat() {
+	if (ended == 1) {
+		return;
+	}
+
 	if (memcmp(monitorAddr, emptyAddr, addrLen) == 0) {
 		printc(RED, "Gateway - sendHeartbeat", "No monitor\n");
 		return;
