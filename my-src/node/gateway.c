@@ -14,8 +14,7 @@ struct Task {
 	uint8_t *client_buf;
 	int client_buf_ptr;
 	size_t client_buf_size;
-	uv_handle_t poll_handle;
-	uv_poll_t poll;
+	uv_poll_t poll_handle;
 	napi_value cb;
 	napi_value close_cb;
 	napi_value message_cb;
@@ -78,6 +77,7 @@ void handle_timer_fd_close(uv_handle_t *handle);
 void handle_timer_fd(uv_poll_t *handle, int status, int events);
 void handle_hb_fd_close(uv_handle_t *handle);
 void handle_hb_fd(uv_poll_t *handle, int status, int events);
+void handle_accept_assigner_fd_close(uv_handle_t *handle);
 void handle_accept_assigner_fd(uv_poll_t *handle, int status, int events);
 void handle_assigner_fd_close(uv_handle_t *handle);
 void handle_find_fd_close(uv_handle_t *handle);
@@ -105,10 +105,10 @@ void addToExpectedConnectionsList(struct sockaddr_in *given_addr);
 void removeFromExpectedConnectionsList(struct sockaddr_in *given_addr);
 uv_loop_t *getUVLoop(napi_env env);
 struct Task *setTaskFD(int fd);
-int addFDToNodeEpoll(uv_loop_t *node_loop, uv_poll_t *poll, uv_handle_t *handle,
-					 int fd, int events, uv_poll_cb cb, uv_close_cb close_cb);
-int modifyFDInNodeEpoll(uv_poll_t *poll, uv_handle_t *handle, int events,
-						uv_poll_cb cb, uv_close_cb close_cb);
+int addFDToNodeEpoll(uv_loop_t *node_loop, uv_poll_t *handle, int fd,
+					 int events, uv_poll_cb cb, uv_close_cb close_cb);
+int modifyFDInNodeEpoll(uv_poll_t *handle, int events, uv_poll_cb cb,
+						uv_close_cb close_cb);
 napi_value getNapiGlobal(napi_env env);
 napi_value napiBool(napi_env env, int boolean);
 napi_value napiInt32(napi_env env, int i);
@@ -116,11 +116,13 @@ napi_value napiUndefined(napi_env env);
 napi_value napiPanic(napi_env env);
 
 napi_value Init(napi_env env, napi_value exports) {
-	if (garp() == NO) {
-		printc(RED, "Gateway - Init", "garp failed\n");
-		napi_set_named_property(env, exports, "ok", napiBool(env, 0));
-		return exports;
-	}
+	// if (garp() == NO) {
+	// 	printc(RED, "Gateway - Init", "garp failed\n");
+	// 	napi_set_named_property(env, exports, "ok", napiBool(env, 0));
+	// 	return exports;
+	// }
+
+	printc(INFO, "INIT", "C code started running\n");
 
 	UID = randInt(-1, MAX_UID);
 
@@ -168,14 +170,19 @@ napi_value Init(napi_env env, napi_value exports) {
 	fmp = malloc(fmp_size);
 
 	uv_loop_t *node_loop = getUVLoop(env);
-	uv_handle_t *handle = malloc(sizeof(uv_handle_t));
-	uv_poll_t *poll = malloc(sizeof(uv_poll_t));
-	addFDToNodeEpoll(node_loop, poll, handle, find_fd, UV_READABLE,
-					 handle_find_fd, handle_find_fd_close);
-	addFDToNodeEpoll(node_loop, poll, handle, hb_fd, UV_READABLE, handle_hb_fd,
+	uv_poll_t *find_poll = malloc(sizeof(uv_poll_t));
+	addFDToNodeEpoll(node_loop, find_poll, find_fd, UV_READABLE, handle_find_fd,
+					 handle_find_fd_close);
+	uv_poll_t *hb_poll = malloc(sizeof(uv_poll_t));
+	addFDToNodeEpoll(node_loop, hb_poll, hb_fd, UV_READABLE, handle_hb_fd,
 					 handle_hb_fd_close);
-	addFDToNodeEpoll(node_loop, poll, handle, timer_fd, UV_READABLE,
+	uv_poll_t *timer_poll = malloc(sizeof(uv_poll_t));
+	addFDToNodeEpoll(node_loop, timer_poll, timer_fd, UV_READABLE,
 					 handle_timer_fd, handle_timer_fd_close);
+	uv_poll_t *accept_assigner_poll = malloc(sizeof(uv_poll_t));
+	addFDToNodeEpoll(node_loop, accept_assigner_poll, accept_assigner_fd,
+					 UV_READABLE, handle_accept_assigner_fd,
+					 handle_accept_assigner_fd_close);
 
 	napi_value OnMessageFN, OnDrainFN, CreateTaskFN;
 	napi_create_function(env, "createTask", 10, CreateTask, NULL,
@@ -257,6 +264,7 @@ int garp() {
 void handle_timer_fd_close(uv_handle_t *handle) {}
 
 void handle_timer_fd(uv_poll_t *handle, int status, int events) {
+	printc(INFO, "gateway - handle_timer_fd", "timer expired\n");
 	readTimerFD(timer_fd);
 
 	// send heartbeat
@@ -278,6 +286,7 @@ void handle_timer_fd(uv_poll_t *handle, int status, int events) {
 void handle_hb_fd_close(uv_handle_t *handle) {}
 
 void handle_hb_fd(uv_poll_t *handle, int status, int events) {
+	printc(INFO, "gateway - handle_hb_fd", "heartbeat received\n");
 	while (1) {
 		int res = getNextDGRAMPacket(hb_fd, hp, hp_size, 0, addr, addrLen);
 
@@ -297,7 +306,10 @@ void handle_hb_fd(uv_poll_t *handle, int status, int events) {
 	}
 }
 
+void handle_accept_assigner_fd_close(uv_handle_t *handle) {}
+
 void handle_accept_assigner_fd(uv_poll_t *handle, int status, int events) {
+	printc(INFO, "gateway - handle_accept_assigner_fd", "new assigner\n");
 	if (status < 0) {
 		printc(RED, "handle_accept_assigner_fd", "Error: %s\n",
 			   uv_strerror(status));
@@ -343,7 +355,7 @@ void handle_accept_assigner_fd(uv_poll_t *handle, int status, int events) {
 		t->active = 1;
 		t->created_at = getCurrTime();
 
-		addFDToNodeEpoll(node_loop, &t->poll, &t->poll_handle, t->assigner_fd,
+		addFDToNodeEpoll(node_loop, &t->poll_handle, t->assigner_fd,
 						 UV_READABLE, handle_assigner_fd,
 						 handle_assigner_fd_close);
 	}
@@ -417,6 +429,7 @@ void handle_find_fd(uv_poll_t *handle, int status, int events) {
 }
 
 void handle_assigner_fd(uv_poll_t *handle, int status, int events) {
+	printc(INFO, "gateway - handle_assigner_fd", "assigner contact\n");
 	struct Task *t = (struct Task *)handle->data;
 
 	if (events & UV_WRITABLE) {
@@ -468,7 +481,7 @@ void handle_assigner_fd(uv_poll_t *handle, int status, int events) {
 						return;
 					}
 
-					modifyFDInNodeEpoll(handle, &t->poll_handle, UV_READABLE,
+					modifyFDInNodeEpoll(&t->poll_handle, UV_READABLE,
 										handle_assigner_fd,
 										handle_assigner_fd_close);
 				}
@@ -482,7 +495,7 @@ void handle_assigner_fd(uv_poll_t *handle, int status, int events) {
 			}
 		}
 	} else if (events & UV_DISCONNECT) {
-		handle->close_cb(&t->poll_handle);
+		handle->close_cb((uv_handle_t *)&t->poll_handle);
 	} else if (events & UV_READABLE) {
 		if (t->active == 0) {
 			t->active = 1;
@@ -568,6 +581,7 @@ void handle_assigner_fd(uv_poll_t *handle, int status, int events) {
 }
 
 napi_value OnMessage(napi_env env, napi_callback_info info) {
+	printc(INFO, "gateway - OnMessage", "message\n");
 	napi_status status;
 	size_t argc = 2;
 	napi_value args[argc];
@@ -633,7 +647,8 @@ napi_value OnMessage(napi_env env, napi_callback_info info) {
 			t->assigner_buf_ptr = max(sent, 0);
 			memcpy(&t->assigner_buf, iop, packetSize);
 
-			uv_poll_start(&t->poll, UV_WRITABLE, handle_assigner_fd);
+			uv_poll_start((uv_poll_t *)&t->poll_handle, UV_WRITABLE,
+						  handle_assigner_fd);
 
 			return napiBool(env, 1);
 		}
@@ -643,6 +658,7 @@ napi_value OnMessage(napi_env env, napi_callback_info info) {
 }
 
 napi_value OnDrain(napi_env env, napi_callback_info info) {
+	printc(INFO, "gateway - OnDrain", "drained ws\n");
 	napi_status status;
 	size_t argc = 1;
 	napi_value args[argc];
@@ -663,10 +679,11 @@ napi_value OnDrain(napi_env env, napi_callback_info info) {
 		return napiUndefined(env);
 	}
 
-	if (uv_poll_start(&taskList[taskID].poll, UV_READABLE, handle_assigner_fd) <
-		0) {
+	if (uv_poll_start(&taskList[taskID].poll_handle, UV_READABLE,
+					  handle_assigner_fd) < 0) {
 		printc(RED, "Gateway - OnDrain", "uv_poll_start errored\n");
-		uv_close(&taskList[taskID].poll_handle, handle_assigner_fd_close);
+		uv_close((uv_handle_t *)&taskList[taskID].poll_handle,
+				 handle_assigner_fd_close);
 		taskList[taskID].filled = 0;
 	}
 
@@ -675,6 +692,7 @@ napi_value OnDrain(napi_env env, napi_callback_info info) {
 
 // createTask(cb, close_cb, message_cb);
 napi_value CreateTask(napi_env env, napi_callback_info info) {
+	printc(INFO, "gateway - CreateTask", "task created\n");
 	napi_status status;
 	size_t argc = 3;
 	napi_value args[argc];
@@ -917,7 +935,6 @@ struct Task *setTaskFD(int fd) {
 		if (taskList[i].filled == 1 && taskList[i].assigner_fd == -1) {
 			taskList[i].assigner_fd = fd;
 			taskList[i].poll_handle.data = &taskList[i];
-			taskList[i].poll.data = &taskList[i];
 			return &taskList[i];
 			break;
 		}
@@ -926,27 +943,27 @@ struct Task *setTaskFD(int fd) {
 	return NULL;
 }
 
-int addFDToNodeEpoll(uv_loop_t *node_loop, uv_poll_t *poll, uv_handle_t *handle,
-					 int fd, int events, uv_poll_cb cb, uv_close_cb close_cb) {
-	int r = uv_poll_init_socket(node_loop, poll, fd);
+int addFDToNodeEpoll(uv_loop_t *node_loop, uv_poll_t *handle, int fd,
+					 int events, uv_poll_cb cb, uv_close_cb close_cb) {
+	int r = uv_poll_init_socket(node_loop, handle, fd);
 	if (r < 0) {
 		return NO;
 	}
 
-	r = uv_poll_start(poll, events, cb);
+	r = uv_poll_start(handle, events, cb);
 	if (r < 0) {
-		uv_close(handle, close_cb);
+		uv_close((uv_handle_t *)handle, close_cb);
 		return NO;
 	}
 
 	return YES;
 }
 
-int modifyFDInNodeEpoll(uv_poll_t *poll, uv_handle_t *handle, int events,
-						uv_poll_cb cb, uv_close_cb close_cb) {
-	int r = uv_poll_start(poll, events, cb);
+int modifyFDInNodeEpoll(uv_poll_t *handle, int events, uv_poll_cb cb,
+						uv_close_cb close_cb) {
+	int r = uv_poll_start(handle, events, cb);
 	if (r < 0) {
-		uv_close(handle, close_cb);
+		uv_close((uv_handle_t *)handle, close_cb);
 		return NO;
 	}
 

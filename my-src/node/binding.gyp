@@ -10,9 +10,6 @@
                         "../../include/print.c",
                         "../../include/utils.c",
                         ],
-            "include_dirs": [
-                "../../include/"
-            ]
         }
     ]
 }

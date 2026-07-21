@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # List your lab PC IPs here
-LAB_PCS=("10.20.14.131") # "10.20.14.118" "10.20.14.124" "10.20.14.108")
+LAB_PCS=("10.20.14.131" "10.20.14.118" "10.20.14.124" ) # "10.20.14.108")
 DEST_PATH="~/Desktop/CodeArena/"
-EXCLUDES="--exclude=.git/ --exclude=*.o --exclude=.vscode/ --exclude=Tests-ignore/ --exclude=*.docx --exclude=build/"
+EXCLUDES="--exclude=.git/ --exclude=.vscode/ --exclude=Tests-ignore/ --exclude=*.docx"
 
 for IP in "${LAB_PCS[@]}"; do
     echo "Syncing to $IP..."

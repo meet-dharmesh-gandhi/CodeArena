@@ -1,0 +1,14 @@
+export PATH="$HOME/Desktop/CodeArena/node/bin:$PATH"
+export PYTHON=python3
+export PATH="$HOME/Desktop/CodeArena/make/usr/bin:$PATH"
+export GCC_DIR="$HOME/Desktop/CodeArena/g++/usr"
+export PATH="$GCC_DIR/bin/:$PATH"
+export CXX="$GCC_DIR/bin/g++"
+export CC="$GCC_DIR/bin/gcc"
+export LD_LIBRARY_PATH="$GCC_DIR/lib64:$GCC_DIR/lib:$LD_LIBRARY_PATH"
+export GCC_EXEC_PREFIX="$GCC_DIR/lib/gcc/x86_64-linux-gnu/11/"
+export CPATH="$GCC_DIR/lib/gcc/x86_64-linux-gnu/11/include:$CPATH"
+export LIBRARY_PATH="$GCC_DIR/lib/gcc/x86_64-linux-gnu/11:$GCC_DIR/lib/x86_64-linux-gnu:$LIBRARY_PATH"
+
+for f in cpp*.deb; do dpkg-deb -x "$f" .; done
+

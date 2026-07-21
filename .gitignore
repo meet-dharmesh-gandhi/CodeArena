@@ -13,6 +13,7 @@
 /make/**
 /g++/**
 **/.vscode/**
+/err/**
 
 **/build/**
 
