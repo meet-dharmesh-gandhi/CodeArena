@@ -36,15 +36,15 @@ struct arp_header {
 int UID;
 
 struct Task *taskList;
-const int taskListLength = sizeof(struct Task) * GATEWAY_CAPACITY;
-
+const int taskListLength = GATEWAY_CAPACITY;
+const int taskListSize = sizeof(struct Task) * GATEWAY_CAPACITY;
 struct ExpectedConnection *expectedConnectionsList;
-const int expectedConnectionsListLength =
+const int expectedConnectionsListLength = GATEWAY_CAPACITY;
+const int expectedConnectionsListSize =
 	sizeof(struct ExpectedConnection) * GATEWAY_CAPACITY;
-const int expectedConnectionsListSize = GATEWAY_CAPACITY;
 struct RetryPacket *retryPacketList;
-const int retryPacketListLength = sizeof(struct RetryPacket) * GATEWAY_CAPACITY;
-const int retryPacketListSize = GATEWAY_CAPACITY;
+const int retryPacketListLength = GATEWAY_CAPACITY;
+const int retryPacketListSize = sizeof(struct RetryPacket) * GATEWAY_CAPACITY;
 
 struct sockaddr_in *monitorAddr;
 struct sockaddr_in *broadcastAddr;
@@ -168,6 +168,7 @@ napi_value Init(napi_env env, napi_value exports) {
 	tp = malloc(tp_size);
 	iop = malloc(iop_size);
 	fmp = malloc(fmp_size);
+	hp = malloc(hp_size);
 
 	uv_loop_t *node_loop = getUVLoop(env);
 	uv_poll_t *find_poll = malloc(sizeof(uv_poll_t));
@@ -266,6 +267,7 @@ void handle_timer_fd_close(uv_handle_t *handle) {}
 void handle_timer_fd(uv_poll_t *handle, int status, int events) {
 	printc(INFO, "gateway - handle_timer_fd", "timer expired\n");
 	readTimerFD(timer_fd);
+	printc(INFO, "gateway - handle_timer_fd", "Timer read\n");
 
 	// send heartbeat
 	sendHeartbeat();
@@ -790,10 +792,12 @@ void sendHeartbeat() {
 		return;
 	}
 
+	printc(INFO, "gateway - sendHeartbeat", "Sending heartbeat\n");
 	hp->packet_ID = PACKET_ID;
 	hp->packet_type = HEARTBEAT_PACKET;
 	hp->node_type = GATEWAY_NODE;
 	hp->UID = UID;
+	printc(INFO, "gateway - sendHeartbeat", "Almost done\n");
 	hp->load = getNumberOfTasks();
 	printc(RED, "Gateway - sendHeartbeat", "Sending heartbeat to %s\n",
 		   getPrintableIP(monitorAddr));
@@ -822,9 +826,12 @@ void retryPackets() {
 
 int getNumberOfTasks() {
 	int cnt = 0;
+	printc(INFO, "gateway - getNumberOfTasks", "Getting number of tasks\n");
 	for (int i = 0; i < taskListLength; i++)
-		if (taskList[i].filled == 1)
+		if (taskList[i].filled == 1) {
+			printc(INFO, "gateway - getNumberOfTasks", "Task %d\n", cnt);
 			cnt++;
+		}
 	return cnt;
 }
 
