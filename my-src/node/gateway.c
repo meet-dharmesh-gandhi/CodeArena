@@ -13,8 +13,9 @@ struct Task {
 	int assigner_buf_filled;
 	uint8_t *client_buf;
 	int client_buf_ptr;
-	int client_buf_size;
-	uv_poll_t poll_handle;
+	size_t client_buf_size;
+	uv_handle_t poll_handle;
+	uv_poll_t poll;
 	napi_value cb;
 	napi_value close_cb;
 	napi_value message_cb;
@@ -66,25 +67,26 @@ const int fonp_size = sizeof(struct found_node_packet);
 struct task_packet *tp;
 const int tp_size = sizeof(struct task_packet);
 struct io_packet *iop;
-const iop_size = sizeof(struct io_packet);
+const int iop_size = sizeof(struct io_packet);
 struct heartbeat_packet *hp;
-const hp_size = sizeof(struct heartbeat_packet);
+const int hp_size = sizeof(struct heartbeat_packet);
 struct find_monitor_packet *fmp;
-const fmp_size = sizeof(struct find_monitor_packet);
+const int fmp_size = sizeof(struct find_monitor_packet);
 
 int garp();
-napi_value handle_timer_fd_close(uv_poll_t *handle);
-napi_value handle_timer_fd(uv_poll_t *handle, int status, int events);
-napi_value handle_hb_fd_close(uv_poll_t *handle);
-napi_value handle_hb_fd(uv_poll_t *handle, int status, int events);
-napi_value handle_accept_assigner_fd(uv_poll_t *handle, int status, int events);
-napi_value handle_assigner_fd_close(uv_handle_t *handle);
-napi_value handle_find_fd_close(uv_poll_t *handle);
-napi_value handle_find_fd(uv_poll_t *handle, int status, int events);
-napi_value handle_assigner_fd(uv_poll_t *handle, int status, int events);
+void handle_timer_fd_close(uv_handle_t *handle);
+void handle_timer_fd(uv_poll_t *handle, int status, int events);
+void handle_hb_fd_close(uv_handle_t *handle);
+void handle_hb_fd(uv_poll_t *handle, int status, int events);
+void handle_accept_assigner_fd(uv_poll_t *handle, int status, int events);
+void handle_assigner_fd_close(uv_handle_t *handle);
+void handle_find_fd_close(uv_handle_t *handle);
+void handle_find_fd(uv_poll_t *handle, int status, int events);
+void handle_assigner_fd(uv_poll_t *handle, int status, int events);
 napi_value OnMessage(napi_env env, napi_callback_info info);
 napi_value OnDrain(napi_env env, napi_callback_info info);
 napi_value CreateTask(napi_env env, napi_callback_info info);
+
 void sendDiscoveryPacket();
 struct Task *addTask(napi_env env, napi_value cb, napi_value close_cb,
 					 napi_value message_cb);
@@ -98,15 +100,15 @@ void sendFindNodePacket(int shouldRetry);
 void addToRetryList(int fd, void *packet, int packet_size,
 					struct sockaddr_in *given_addr);
 int removeFromRetryList(int fd, int packet_type, int packet_size);
-int sendTaskPacket(int taskID);
+void sendTaskPacket(int taskID);
 void addToExpectedConnectionsList(struct sockaddr_in *given_addr);
 void removeFromExpectedConnectionsList(struct sockaddr_in *given_addr);
 uv_loop_t *getUVLoop(napi_env env);
 struct Task *setTaskFD(int fd);
-int addFDToNodeEpoll(uv_poll_t *node_loop, uv_poll_t *handle, int fd,
-					 int events, uv_poll_cb cb, uv_poll_cb close_cb);
-int modifyFDInNodeEpoll(uv_poll_t *handle, int events, uv_poll_cb cb,
-						uv_poll_cb close_cb);
+int addFDToNodeEpoll(uv_loop_t *node_loop, uv_poll_t *poll, uv_handle_t *handle,
+					 int fd, int events, uv_poll_cb cb, uv_close_cb close_cb);
+int modifyFDInNodeEpoll(uv_poll_t *poll, uv_handle_t *handle, int events,
+						uv_poll_cb cb, uv_close_cb close_cb);
 napi_value getNapiGlobal(napi_env env);
 napi_value napiBool(napi_env env, int boolean);
 napi_value napiInt32(napi_env env, int i);
@@ -166,13 +168,14 @@ napi_value Init(napi_env env, napi_value exports) {
 	fmp = malloc(fmp_size);
 
 	uv_loop_t *node_loop = getUVLoop(env);
-	uv_loop_t *handle;
-	addFDToNodeEpoll(node_loop, handle, find_fd, UV_READABLE, handle_find_fd,
-					 handle_find_fd_close);
-	addFDToNodeEpoll(node_loop, handle, hb_fd, UV_READABLE, handle_hb_fd,
+	uv_handle_t *handle = malloc(sizeof(uv_handle_t));
+	uv_poll_t *poll = malloc(sizeof(uv_poll_t));
+	addFDToNodeEpoll(node_loop, poll, handle, find_fd, UV_READABLE,
+					 handle_find_fd, handle_find_fd_close);
+	addFDToNodeEpoll(node_loop, poll, handle, hb_fd, UV_READABLE, handle_hb_fd,
 					 handle_hb_fd_close);
-	addFDToNodeEpoll(node_loop, handle, timer_fd, UV_READABLE, handle_timer_fd,
-					 handle_timer_fd_close);
+	addFDToNodeEpoll(node_loop, poll, handle, timer_fd, UV_READABLE,
+					 handle_timer_fd, handle_timer_fd_close);
 
 	napi_value OnMessageFN, OnDrainFN, CreateTaskFN;
 	napi_create_function(env, "createTask", 10, CreateTask, NULL,
@@ -182,7 +185,7 @@ napi_value Init(napi_env env, napi_value exports) {
 
 	napi_set_named_property(env, exports, "createTasks", CreateTaskFN);
 	napi_set_named_property(env, exports, "onDrain", OnDrainFN);
-	napi_set_named_property(env, exports, "onMessage", OnMessage);
+	napi_set_named_property(env, exports, "onMessage", OnMessageFN);
 	napi_set_named_property(env, exports, "ok", napiBool(env, 1));
 
 	return exports;
@@ -219,7 +222,7 @@ int garp() {
 	struct sockaddr_ll *mac = (struct sockaddr_ll *)ifa->ifa_addr;
 
 	memset(eth->h_dest, 0xff, 6);
-	memset(eth->h_source, mac->sll_addr, 6);
+	memcpy(&eth->h_source, &mac->sll_addr, 6);
 	eth->h_proto = htons(0x0806);
 
 	arp->hardware_type = htons(1);
@@ -251,9 +254,9 @@ int garp() {
 	return YES;
 }
 
-napi_value handle_timer_fd_close(uv_poll_t *handle) {}
+void handle_timer_fd_close(uv_handle_t *handle) {}
 
-napi_value handle_timer_fd(uv_poll_t *handle, int status, int events) {
+void handle_timer_fd(uv_poll_t *handle, int status, int events) {
 	readTimerFD(timer_fd);
 
 	// send heartbeat
@@ -272,9 +275,9 @@ napi_value handle_timer_fd(uv_poll_t *handle, int status, int events) {
 	sendDiscoveryPacket();
 }
 
-napi_value handle_hb_fd_close(uv_poll_t *handle) {}
+void handle_hb_fd_close(uv_handle_t *handle) {}
 
-napi_value handle_hb_fd(uv_poll_t *handle, int status, int events) {
+void handle_hb_fd(uv_poll_t *handle, int status, int events) {
 	while (1) {
 		int res = getNextDGRAMPacket(hb_fd, hp, hp_size, 0, addr, addrLen);
 
@@ -294,8 +297,7 @@ napi_value handle_hb_fd(uv_poll_t *handle, int status, int events) {
 	}
 }
 
-napi_value handle_accept_assigner_fd(uv_poll_t *handle, int status,
-									 int events) {
+void handle_accept_assigner_fd(uv_poll_t *handle, int status, int events) {
 	if (status < 0) {
 		printc(RED, "handle_accept_assigner_fd", "Error: %s\n",
 			   uv_strerror(status));
@@ -303,7 +305,7 @@ napi_value handle_accept_assigner_fd(uv_poll_t *handle, int status,
 	}
 
 	while (1) {
-		int addrLength = addrLen;
+		socklen_t addrLength = addrLen;
 		int res = accept(accept_assigner_fd, addr, &addrLength);
 
 		if (res < 0) {
@@ -341,18 +343,18 @@ napi_value handle_accept_assigner_fd(uv_poll_t *handle, int status,
 		t->active = 1;
 		t->created_at = getCurrTime();
 
-		addFDToNodeEpoll(node_loop, &t->poll_handle, t->assigner_fd,
+		addFDToNodeEpoll(node_loop, &t->poll, &t->poll_handle, t->assigner_fd,
 						 UV_READABLE, handle_assigner_fd,
 						 handle_assigner_fd_close);
 	}
 }
 
-napi_value handle_assigner_fd_close(uv_handle_t *handle) {
+void handle_assigner_fd_close(uv_handle_t *handle) {
 	printc(RED, "Gateway - handle_assigner_fd", "assigner disconnected\n");
 	// close the websocket
 	struct Task *t = (struct Task *)handle->data;
 	napi_value global;
-	int status = napi_get_global(t->env, &global);
+	napi_status status = napi_get_global(t->env, &global);
 	if (status != napi_ok) {
 		return;
 	}
@@ -360,20 +362,22 @@ napi_value handle_assigner_fd_close(uv_handle_t *handle) {
 	t->active = 0;
 	t->created_at = getCurrTime();
 
-	napi_status status =
-		napi_call_function(t->env, global, t->close_cb, 1, t->taskID, NULL);
+	napi_value taskID;
+	napi_create_int32(t->env, t->taskID, &taskID);
+
+	status = napi_call_function(t->env, global, t->close_cb, 1, &taskID, NULL);
 	if (status != napi_ok) {
 		printNapiError(t->env, "handle_assigner_fd");
-		return napiUndefined(t->env);
+		return;
 	}
 
 	t->filled = 0;
 	close(t->assigner_fd);
 }
 
-napi_value handle_find_fd_close(uv_poll_t *handle) {}
+void handle_find_fd_close(uv_handle_t *handle) {}
 
-napi_value handle_find_fd(uv_poll_t *handle, int status, int events) {
+void handle_find_fd(uv_poll_t *handle, int status, int events) {
 	while (1) {
 		int res = getNextDGRAMPacket(find_fd, buf, buf_size, 0, addr, addrLen);
 
@@ -412,7 +416,7 @@ napi_value handle_find_fd(uv_poll_t *handle, int status, int events) {
 	}
 }
 
-napi_value handle_assigner_fd(uv_poll_t *handle, int status, int events) {
+void handle_assigner_fd(uv_poll_t *handle, int status, int events) {
 	struct Task *t = (struct Task *)handle->data;
 
 	if (events & UV_WRITABLE) {
@@ -454,15 +458,17 @@ napi_value handle_assigner_fd(uv_poll_t *handle, int status, int events) {
 						return;
 					}
 
+					napi_value taskID;
+					napi_create_int32(t->env, t->taskID, &taskID);
 					napi_status status = napi_call_function(
-						t->env, global, t->cb, 1, t->taskID, NULL);
+						t->env, global, t->cb, 1, &taskID, NULL);
 					if (status != napi_ok) {
 						printc(RED, "Gateway - handle_assigner_fd",
 							   "Call to cb failed\n");
 						return;
 					}
 
-					modifyFDInNodeEpoll(&t->poll_handle, UV_READABLE,
+					modifyFDInNodeEpoll(handle, &t->poll_handle, UV_READABLE,
 										handle_assigner_fd,
 										handle_assigner_fd_close);
 				}
@@ -476,7 +482,7 @@ napi_value handle_assigner_fd(uv_poll_t *handle, int status, int events) {
 			}
 		}
 	} else if (events & UV_DISCONNECT) {
-		handle->close_cb(handle);
+		handle->close_cb(&t->poll_handle);
 	} else if (events & UV_READABLE) {
 		if (t->active == 0) {
 			t->active = 1;
@@ -485,10 +491,10 @@ napi_value handle_assigner_fd(uv_poll_t *handle, int status, int events) {
 
 		while (1) {
 			int packet_type =
-				getPacketType(task_fd, &t->assigner_buf, &t->assigner_buf_ptr);
+				getPacketType(task_fd, t->assigner_buf, &t->assigner_buf_ptr);
 
 			if (packet_type == IO_PACKET) {
-				int res = getIOPacketData(task_fd, &t->assigner_buf,
+				int res = getIOPacketData(task_fd, t->assigner_buf,
 										  &t->assigner_buf_ptr, iop,
 										  &t->assigner_buf_filled);
 
@@ -498,7 +504,7 @@ napi_value handle_assigner_fd(uv_poll_t *handle, int status, int events) {
 					napi_value buffer;
 					uint8_t *buffer_data;
 					napi_status status = napi_create_buffer(
-						t->env, dataSize, &buffer_data, &buffer);
+						t->env, dataSize, (void *)&buffer_data, &buffer);
 
 					if (status != napi_ok) {
 						printc(RED, "Gateway - handle_assigner_fd",
@@ -514,7 +520,7 @@ napi_value handle_assigner_fd(uv_poll_t *handle, int status, int events) {
 					if (global == NULL) {
 						printc(RED, "Gateway - handle_assigner_fd",
 							   "Could not get global\n");
-						return napiUndefined(t->env);
+						return;
 					}
 
 					napi_value result;
@@ -525,10 +531,10 @@ napi_value handle_assigner_fd(uv_poll_t *handle, int status, int events) {
 							   "Could not call message_cb\n");
 						printNapiError(t->env,
 									   "handle_assigner_fd - message_cb");
-						return napiUndefined(t->env);
+						return;
 					}
 
-					napi_value var_type;
+					napi_valuetype var_type;
 					status = napi_typeof(t->env, result, &var_type);
 					if (status != napi_ok || var_type != napi_boolean) {
 						printc(RED, "Gateway - handle_assigner_fd",
@@ -536,24 +542,24 @@ napi_value handle_assigner_fd(uv_poll_t *handle, int status, int events) {
 						printNapiError(
 							t->env,
 							"handle_assigner_fd - return type message_cb");
-						return napiUndefined(t->env);
+						return;
 					}
 
-					int wsFilled;
+					bool wsFilled;
 					status = napi_get_value_bool(t->env, result, &wsFilled);
 					if (status != napi_ok) {
 						printc(RED, "Gateway - handle_assigner_fd",
 							   "Could not read boolean\n");
 						printNapiError(t->env, "handle_assigner_fd - return "
 											   "type message_cb extract");
-						return napiUndefined(t->env);
+						return;
 					}
 
 					if (wsFilled == 1) {
 						// stop the assigner
 						printc(RED, "Gateway - handle_assigner_fd",
 							   "WS filled\n");
-						uv_poll_stop(&t->poll_handle);
+						uv_poll_stop(handle);
 					}
 				}
 			}
@@ -563,18 +569,18 @@ napi_value handle_assigner_fd(uv_poll_t *handle, int status, int events) {
 
 napi_value OnMessage(napi_env env, napi_callback_info info) {
 	napi_status status;
-	int argc = 2;
+	size_t argc = 2;
 	napi_value args[argc];
 
-	status = napi_get_cb_info(env, info, &argc, &args, NULL, NULL);
+	status = napi_get_cb_info(env, info, &argc, args, NULL, NULL);
 	if (status != napi_ok || argc < 2) {
 		printc(RED, "Gateway - OnMessage", "Could not get args\n");
 		printNapiError(env, "OnMessage");
 		return napiUndefined(env);
 	}
 
-	int res;
-	status = napi_is_buffer(env, args[0], res);
+	bool res;
+	status = napi_is_buffer(env, args[0], &res);
 	if (status != napi_ok || res != 1) {
 		printc(RED, "Gateway - OnMessage", "First argument not a buffer\n");
 		printNapiError(env, "OnMessage - res");
@@ -592,8 +598,8 @@ napi_value OnMessage(napi_env env, napi_callback_info info) {
 
 	struct Task *t = &taskList[taskID];
 
-	status =
-		napi_get_buffer_info(env, args[0], &t->client_buf, &t->client_buf_size);
+	status = napi_get_buffer_info(env, args[0], (void *)&t->client_buf,
+								  &t->client_buf_size);
 	t->client_buf_ptr = 0;
 	if (status != napi_ok) {
 		printc(RED, "Gateway - OnMessage", "Could not get buffer info\n");
@@ -627,7 +633,7 @@ napi_value OnMessage(napi_env env, napi_callback_info info) {
 			t->assigner_buf_ptr = max(sent, 0);
 			memcpy(&t->assigner_buf, iop, packetSize);
 
-			uv_poll_start(&t->poll_handle, UV_WRITABLE, handle_assigner_fd);
+			uv_poll_start(&t->poll, UV_WRITABLE, handle_assigner_fd);
 
 			return napiBool(env, 1);
 		}
@@ -638,10 +644,10 @@ napi_value OnMessage(napi_env env, napi_callback_info info) {
 
 napi_value OnDrain(napi_env env, napi_callback_info info) {
 	napi_status status;
-	int argc = 1;
+	size_t argc = 1;
 	napi_value args[argc];
 
-	status = napi_get_cb_info(env, info, &argc, &args, NULL, NULL);
+	status = napi_get_cb_info(env, info, &argc, args, NULL, NULL);
 	if (status != napi_ok || argc < 1) {
 		printc(RED, "Gateway - OnDrain", "Could not get args\n");
 		printNapiError(env, "OnDrain");
@@ -657,18 +663,20 @@ napi_value OnDrain(napi_env env, napi_callback_info info) {
 		return napiUndefined(env);
 	}
 
-	if (uv_poll_start(&taskList[taskID].poll_handle, UV_READABLE,
-					  handle_assigner_fd) < 0) {
+	if (uv_poll_start(&taskList[taskID].poll, UV_READABLE, handle_assigner_fd) <
+		0) {
 		printc(RED, "Gateway - OnDrain", "uv_poll_start errored\n");
 		uv_close(&taskList[taskID].poll_handle, handle_assigner_fd_close);
 		taskList[taskID].filled = 0;
 	}
+
+	return napiUndefined(env);
 }
 
 // createTask(cb, close_cb, message_cb);
 napi_value CreateTask(napi_env env, napi_callback_info info) {
 	napi_status status;
-	int argc = 3;
+	size_t argc = 3;
 	napi_value args[argc];
 	napi_value jsthis;
 
@@ -744,6 +752,9 @@ struct Task *addTask(napi_env env, napi_value cb, napi_value close_cb,
 			return &taskList[i];
 		}
 	}
+
+	printc(RED, "Gateway - addTask", "Could not add task\n");
+	return NULL;
 }
 
 void checkMonitor() {
@@ -800,7 +811,7 @@ int getNumberOfTasks() {
 }
 
 void printNapiError(napi_env env, char *func_name) {
-	napi_extended_error_info *neei = NULL;
+	const napi_extended_error_info *neei = NULL;
 	napi_get_last_error_info(env, &neei);
 	printc(RED, func_name, "Error: %s\n",
 		   neei->error_message == NULL ? "Unknown N-API error"
@@ -853,7 +864,7 @@ int removeFromRetryList(int fd, int packet_type, int packet_size) {
 	return NO;
 }
 
-int sendTaskPacket(int taskID) {
+void sendTaskPacket(int taskID) {
 	tp->packet_ID = PACKET_ID;
 	tp->packet_type = TASK_PACKET;
 	tp->node_type = GATEWAY_NODE;
@@ -906,20 +917,23 @@ struct Task *setTaskFD(int fd) {
 		if (taskList[i].filled == 1 && taskList[i].assigner_fd == -1) {
 			taskList[i].assigner_fd = fd;
 			taskList[i].poll_handle.data = &taskList[i];
+			taskList[i].poll.data = &taskList[i];
 			return &taskList[i];
 			break;
 		}
 	}
+
+	return NULL;
 }
 
-int addFDToNodeEpoll(uv_poll_t *node_loop, uv_poll_t *handle, int fd,
-					 int events, uv_poll_cb cb, uv_poll_cb close_cb) {
-	int r = uv_poll_init_socket(node_loop, handle, fd);
+int addFDToNodeEpoll(uv_loop_t *node_loop, uv_poll_t *poll, uv_handle_t *handle,
+					 int fd, int events, uv_poll_cb cb, uv_close_cb close_cb) {
+	int r = uv_poll_init_socket(node_loop, poll, fd);
 	if (r < 0) {
 		return NO;
 	}
 
-	r = uv_poll_start(handle, events, cb);
+	r = uv_poll_start(poll, events, cb);
 	if (r < 0) {
 		uv_close(handle, close_cb);
 		return NO;
@@ -928,9 +942,9 @@ int addFDToNodeEpoll(uv_poll_t *node_loop, uv_poll_t *handle, int fd,
 	return YES;
 }
 
-int modifyFDInNodeEpoll(uv_poll_t *handle, int events, uv_poll_cb cb,
-						uv_poll_cb close_cb) {
-	int r = uv_poll_start(handle, events, cb);
+int modifyFDInNodeEpoll(uv_poll_t *poll, uv_handle_t *handle, int events,
+						uv_poll_cb cb, uv_close_cb close_cb) {
+	int r = uv_poll_start(poll, events, cb);
 	if (r < 0) {
 		uv_close(handle, close_cb);
 		return NO;

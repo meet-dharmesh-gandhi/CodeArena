@@ -145,7 +145,7 @@ void readTimerFD(int timerfd) {
  * Returns UNKNOWN if the socket throws some error
  */
 int getPacketType(int fd, uint8_t *fd_buf, int *fd_buf_ptr) {
-	if (*fd_buf_ptr < (sizeof(int) * 2)) {
+	if (*fd_buf_ptr < (int)(sizeof(int) * 2)) {
 		int required = (sizeof(int) * 2) - *fd_buf_ptr;
 		int recved = recv(fd, *fd_buf_ptr + fd_buf, required, 0);
 
@@ -181,7 +181,7 @@ int getPacketType(int fd, uint8_t *fd_buf, int *fd_buf_ptr) {
  */
 int getPacketData(int fd, uint8_t *fd_buf, int *fd_buf_ptr, uint8_t *packet,
 				  int packet_len) {
-	if (*fd_buf_ptr < 2 * sizeof(int)) {
+	if (*fd_buf_ptr < (int)(2 * sizeof(int))) {
 		return UNKNOWN;
 	}
 
@@ -208,7 +208,7 @@ int getPacketData(int fd, uint8_t *fd_buf, int *fd_buf_ptr, uint8_t *packet,
 
 int getIOPacketData(int fd, uint8_t *fd_buf, int *fd_buf_ptr,
 					struct io_packet *packet, int *filled) {
-	if (*fd_buf_ptr < 2 * sizeof(int)) {
+	if (*fd_buf_ptr < (int)(2 * sizeof(int))) {
 		return UNKNOWN;
 	}
 
@@ -249,7 +249,7 @@ int getIOPacketData(int fd, uint8_t *fd_buf, int *fd_buf_ptr,
 	return YES;
 }
 
-int sendPacket(uint8_t *packet_buf, int *packet_buf_ptr, int packet_size) {}
+// int sendPacket(uint8_t *packet_buf, int *packet_buf_ptr, int packet_size) {}
 
 // /**
 //  * This function is called when a socket triggers EPOLLIN

@@ -15,7 +15,7 @@ void printc(char *color, const char *prefix, const char *format, ...) {
 void printcRaw(char *color, const char *prefix, const char *format,
 			   va_list args) {
 	char *fColor = color;
-	if (fColor == "") {
+	if (fColor == NULL || fColor[0] == '\0') {
 		fColor = GRN;
 	}
 
