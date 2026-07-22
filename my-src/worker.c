@@ -23,7 +23,7 @@ const int fdBuf_size = sizeof(uint8_t) * LARGEST_PACKET;
 int task_fd, discover_fd, hb_fd, assigner_fd, role_fd, timer_fd;
 
 time_t *monitor_last_shouted;
-int monitor_last_shouted_size = sizeof(time_t);
+const int monitor_last_shouted_size = sizeof(time_t);
 
 struct sockaddr_in *monitorAddr;
 struct sockaddr_in *emptyAddr;
@@ -92,16 +92,23 @@ int main(int argc, char const *argv[]) {
 	arena = createArena(ARENA_SIZE);
 
 	taskList = amalloc(&arena, taskListLength);
+	memset(taskList, 0, taskListSize);
 	intermediateBufferList = amalloc(&arena, intermediateBufferListLength);
+	memset(intermediateBufferList, 0, intermediateBufferListSize);
 	expectedConnectionsList = amalloc(&arena, expectedConnectionsListLength);
+	memset(expectedConnectionsList, 0, expectedConnectionsListSize);
 
 	monitor_last_shouted = amalloc(&arena, monitor_last_shouted_size);
+	memset(monitor_last_shouted, 0, monitor_last_shouted_size);
+	monitor_last_shouted = -1;
 
 	monitorAddr = amalloc(&arena, addrLen);
 	emptyAddr = amalloc(&arena, addrLen);
 	broadcastAddr = amalloc(&arena, addrLen);
 	addr = amalloc(&arena, addrLen);
 
+	memset(emptyAddr, 0, addrLen);
+	memset(monitorAddr, 0, addrLen);
 	set_broadcast_addr(DISCOVER_PORT, broadcastAddr);
 
 	task_fd = getNewSocket(TASK_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
@@ -498,7 +505,7 @@ void handle_hb_fd(struct socketDetails *sd) {
 				if (memcmp(monitorAddr, emptyAddr, addrLen) == 0) {
 					printc(INFO, "worker - handle_hb_fd", "New monitor: %s\n",
 						   getPrintableIP(addr));
-					memcpy(addr, monitorAddr, addrLen);
+					memcpy(monitorAddr, addr, addrLen);
 					*monitor_last_shouted = getCurrTime();
 				} else if (memcmp(addr, monitorAddr, addrLen) == 0) {
 					printc(INFO, "worker - handle_hb_fd",
@@ -690,7 +697,7 @@ void cleanUpTasks() {
 	for (int i = 0; i < taskListLength; i++) {
 		if (taskList[i].filled == 1 && taskList[i].lastConnected > 0 &&
 			currTime - taskList[i].lastConnected > EXPIRE_PERIOD) {
-			taskList[i].filled == 0;
+			taskList[i].filled = 0;
 		}
 	}
 }

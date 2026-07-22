@@ -54,12 +54,16 @@ int main(int argc, char const *argv[]) {
 	fd_buf = amalloc(&arena, fdBuf_size);
 
 	monitorLastShouted = amalloc(&arena, monitorLastShoutedLength);
+	memset(monitorLastShouted, 0, monitorLastShoutedLength);
+	*monitorLastShouted = -1;
 
 	monitorAddr = amalloc(&arena, addrLen);
 	emptyAddr = amalloc(&arena, addrLen);
 	broadcastAddr = amalloc(&arena, addrLen);
 	addr = amalloc(&arena, addrLen);
 
+	memset(emptyAddr, 0, addrLen);
+	memset(monitorAddr, 0, addrLen);
 	set_broadcast_addr(DISCOVER_PORT, broadcastAddr);
 
 	discover_fd = getNewSocket(DISCOVER_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);

@@ -41,7 +41,7 @@ int run_container(void *arg) {
 	printc(INFO, "container - run_container", "Container started\n");
 	int container_fd = *(int *)arg;
 	buf = malloc(MAX_FILE_SIZE);
-	filename = malloc(MAX_FILENAME_SIZE);
+	filename = malloc(MAX_FILENAME_SIZE + 1);
 
 	int required = sizeof(uint8_t);
 	int recved = recvFull(container_fd, buf, required, 0);
@@ -51,8 +51,8 @@ int run_container(void *arg) {
 	}
 
 	// got the number of incoming files!
-	printc(INFO, "container - run_container", "Number of files: %d\n", n_files);
 	memcpy(&n_files, buf, required);
+	printc(INFO, "container - run_container", "Number of files: %d\n", n_files);
 
 	if (n_files > MAX_FILES) {
 		// invalid number of files
@@ -102,6 +102,12 @@ int createFile(int container_fd) {
 	// got the filename size
 	memcpy(&filename_size, buf, required);
 
+	if (filename_size > MAX_FILENAME_SIZE) {
+		printc(ERR, "container - createFile",
+			   "filename too huge, filename size: %d\n", filename_size);
+		exit(1);
+	}
+
 	// next get the filename
 	required = filename_size;
 	recved = recvFull(container_fd, buf, required, 0);
@@ -115,6 +121,7 @@ int createFile(int container_fd) {
 	// got the filename
 	memset(filename, 0, required);
 	memcpy(filename, buf, required);
+	filename[required] = '\0';
 
 	// next get file size
 	required = sizeof(uint32_t);

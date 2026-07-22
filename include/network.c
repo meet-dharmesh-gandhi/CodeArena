@@ -44,7 +44,7 @@ int recvFull(int __fd, const void *__buf, size_t __n, int __flags) {
 		}
 		ssize_t r =
 			recv(__fd, (uint8_t *)__buf + recved, __n - recved, __flags);
-		if (r >= 0) {
+		if (r > 0) {
 			recved += r;
 			continue;
 		}

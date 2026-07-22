@@ -111,16 +111,23 @@ int main(int argc, char const *argv[]) {
 	arena = createArena(ARENA_SIZE);
 
 	taskList = amalloc(&arena, taskListSize);
+	memset(taskList, 0, taskListSize);
 	monitorList = amalloc(&arena, monitorListSize);
+	memset(monitorList, 0, monitorListSize);
 	retryPacketsList = amalloc(&arena, retryPacketsListSize);
+	memset(retryPacketsList, 0, retryPacketsListSize);
 	intermediateBufferList = amalloc(&arena, intermediateBufferListSize);
+	memset(intermediateBufferList, 0, intermediateBufferListSize);
 	expectedConnectionsList = amalloc(&arena, expectedConnectionsListSize);
+	memset(expectedConnectionsList, 0, expectedConnectionsListSize);
 
 	monitorAddr = amalloc(&arena, addrLen);
 	emptyAddr = amalloc(&arena, addrLen);
 	broadcastAddr = amalloc(&arena, addrLen);
 	addr = amalloc(&arena, addrLen);
 
+	memset(emptyAddr, 0, addrLen);
+	memset(monitorAddr, 0, addrLen);
 	set_broadcast_addr(DISCOVER_PORT, broadcastAddr);
 
 	task_fd = getNewSocket(TASK_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
@@ -239,7 +246,7 @@ void handle_timer_fd(struct socketDetails *sd) {
 }
 
 void handle_accept_worker_fd(struct socketDetails *sd) {
-	if (sd->events && EPOLLIN) {
+	if (sd->events & EPOLLIN) {
 		// new connection request(s)
 
 		while (1) {
@@ -723,6 +730,8 @@ void handle_find_fd(struct socketDetails *sd) {
 					}
 				}
 			}
+		} else if (res != 2) {
+			break;
 		}
 	}
 }
@@ -764,6 +773,8 @@ void handle_task_fd(struct socketDetails *sd) {
 				// sent or not is irrelevant since retry will happen anyways
 				sendFindNodePacket(monitorAddr, 0, 1, WORKER_NODE);
 			}
+		} else if (res != 2) {
+			break;
 		}
 	}
 }
@@ -831,7 +842,7 @@ void sendHeartbeat() {
 
 	checkMonitor();
 
-	if (monitorAddr == NULL) {
+	if (memcmp(monitorAddr, emptyAddr, addrLen) == 0) {
 		printc(INFO, "assigner - sendHeartbeat", "Discovering monitor\n");
 		sendFindMonitorPacket();
 		return;
@@ -868,7 +879,9 @@ void checkMonitor() {
 			}
 		}
 
-		monitorAddr = newMonitorAddr;
+		if (newMonitorAddr == NULL) {
+			monitorAddr = newMonitorAddr;
+		}
 	}
 }
 
@@ -1041,6 +1054,7 @@ int addExpectedConnection(int sent_packet_type, struct sockaddr_in *given_addr,
 
 	for (int i = 0; i < expectedConnectionsListLength; i++) {
 		if (expectedConnectionsList[i].filled == 0) {
+			expectedConnectionsList[i].filled = 1;
 			expectedConnectionsList[i].sent_packet_type = sent_packet_type;
 			expectedConnectionsList[i].handler = handler;
 			memcpy(&expectedConnectionsList[i].addr, given_addr, addrLen);
@@ -1159,7 +1173,7 @@ int removeFromRetryList(int fd, struct sockaddr_in *given_addr,
 		if (retryPacketsList[i].filled == 1 && retryPacketsList[i].fd == fd &&
 			retryPacketsList[i].packet_type == packet_type &&
 			memcmp(&retryPacketsList[i].addr, given_addr, addrLen) == 0) {
-			retryPacketsList[i].filled == 0;
+			retryPacketsList[i].filled = 0;
 			return YES;
 		}
 	}

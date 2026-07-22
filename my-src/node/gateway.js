@@ -53,7 +53,7 @@ wss.on("connection", (ws) => {
 
 			if (ws.bufferedAmount > WS_CAPACITY) {
 				const interval = setInterval(() => {
-					if (bufferedAmount < WS_CAPACITY) {
+					if (ws.bufferedAmount < WS_CAPACITY) {
 						cG.onDrain(taskID);
 						clearInterval(interval);
 					}
@@ -66,10 +66,10 @@ wss.on("connection", (ws) => {
 	);
 	if (taskID < 0) {
 		ws.close(404);
+	} else {
+		tasks[taskID] = ws;
+		console.log("connection");
 	}
-
-	tasks[taskID] = ws;
-	console.log("connection");
 
 	ws.on("message", (message) => {
 		console.log("message");

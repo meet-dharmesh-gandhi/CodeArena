@@ -101,11 +101,13 @@ void retryPackets();
 int getNumberOfTasks();
 void printNapiError(napi_env env, char *func_name);
 void sendFindNodePacket(int shouldRetry);
-void addToRetryList(int fd, void *packet, int packet_size,
+void addToRetryList(int fd, void *packet, int packet_size, int packet_type,
 					struct sockaddr_in *given_addr);
 int removeFromRetryList(int fd, int packet_type, int packet_size);
 void sendTaskPacket(int taskID);
-void addToExpectedConnectionsList(struct sockaddr_in *given_addr);
+void addToExpectedConnectionsList(struct sockaddr_in *given_addr,
+								  int sent_packet_type,
+								  void (*handler)(struct socketDetails *sd));
 void removeFromExpectedConnectionsList(struct sockaddr_in *given_addr);
 uv_loop_t *getUVLoop(napi_env env);
 struct Task *setTaskFD(int fd);
@@ -137,13 +139,19 @@ napi_value Start(napi_env env, napi_value exports) {
 		return exports;
 	}
 
-	taskList = malloc(taskListLength);
-	expectedConnectionsList = malloc(expectedConnectionsListLength);
-	retryPacketList = malloc(retryPacketListLength);
+	taskList = malloc(taskListSize);
+	memset(taskList, 0, taskListSize);
+	expectedConnectionsList = malloc(expectedConnectionsListSize);
+	memset(expectedConnectionsList, 0, expectedConnectionsListSize);
+	retryPacketList = malloc(retryPacketListSize);
+	memset(retryPacketList, 0, retryPacketListSize);
 
 	monitorAddr = malloc(addrLen);
 	emptyAddr = malloc(addrLen);
 	broadcastAddr = malloc(addrLen);
+
+	memset(emptyAddr, 0, addrLen);
+	memset(monitorAddr, 0, addrLen);
 	set_broadcast_addr(DISCOVER_PORT, broadcastAddr);
 	addr = malloc(addrLen);
 
@@ -914,11 +922,11 @@ void sendFindNodePacket(int shouldRetry) {
 	sendto(find_fd, fnp, fnp_size, 0, monitorAddr, addrLen);
 
 	if (shouldRetry) {
-		addToRetryList(find_fd, fnp, fnp_size, monitorAddr);
+		addToRetryList(find_fd, fnp, fnp_size, FIND_NODE_PACKET, monitorAddr);
 	}
 }
 
-void addToRetryList(int fd, void *packet, int packet_size,
+void addToRetryList(int fd, void *packet, int packet_size, int packet_type,
 					struct sockaddr_in *given_addr) {
 	if (given_addr == NULL) {
 		given_addr = addr;
@@ -929,7 +937,7 @@ void addToRetryList(int fd, void *packet, int packet_size,
 			retryPacketList[i].filled = 1;
 			retryPacketList[i].fd = fd;
 			retryPacketList[i].last_sent = getCurrTime();
-			retryPacketList[i].packet_type = FIND_NODE_PACKET;
+			retryPacketList[i].packet_type = packet_type;
 			retryPacketList[i].packet_size = packet_size;
 			memcpy(&retryPacketList[i].packet, packet, packet_size);
 			memcpy(&retryPacketList[i].addr, given_addr, addrLen);
@@ -959,17 +967,23 @@ void sendTaskPacket(int taskID) {
 	tp->taskID = taskID;
 	sendto(task_fd, tp, tp_size, 0, &fonp->addr, addrLen);
 
-	addToRetryList(task_fd, tp, tp_size, &fonp->addr);
-	addToExpectedConnectionsList(&fonp->addr);
+	addToRetryList(task_fd, tp, tp_size, TASK_PACKET, &fonp->addr);
+	addToExpectedConnectionsList(&fonp->addr, TASK_PACKET,
+								 handle_accept_assigner_fd);
 }
 
-void addToExpectedConnectionsList(struct sockaddr_in *given_addr) {
+void addToExpectedConnectionsList(struct sockaddr_in *given_addr,
+								  int sent_packet_type,
+								  void (*handler)(struct socketDetails *sd)) {
 	if (given_addr == NULL) {
 		given_addr = addr;
 	}
 
 	for (int i = 0; i < expectedConnectionsListLength; i++) {
 		if (expectedConnectionsList[i].filled == 0) {
+			expectedConnectionsList[i].filled = 1;
+			expectedConnectionsList[i].handler = handler;
+			expectedConnectionsList[i].sent_packet_type = sent_packet_type;
 			memcpy(&expectedConnectionsList[i].addr, given_addr, addrLen);
 			return;
 		}

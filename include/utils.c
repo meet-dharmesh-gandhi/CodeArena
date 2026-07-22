@@ -106,14 +106,14 @@ void manipulate_value_cond(void *dest, const void *src, size_t n,
 
 int divideCeil(int numerator, int denominator) {
 	return (numerator < 0) == (denominator < 0)
-			   ? (numerator / denominator)
-			   : ((numerator / denominator) - 1);
+			   ? ((numerator / denominator) + 1)
+			   : (numerator / denominator);
 }
 
 int divideFloor(int numerator, int denominator) {
 	return (numerator < 0) == (denominator < 0)
-			   ? ((numerator / denominator) + 1)
-			   : (numerator / denominator);
+			   ? (numerator / denominator)
+			   : ((numerator / denominator) - 1);
 }
 
 int limit(int num, int lowest, int highest) {

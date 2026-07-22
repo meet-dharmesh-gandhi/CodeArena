@@ -29,7 +29,7 @@ const int addrLen = sizeof(struct sockaddr_in);
 struct generic_packet *gp;
 const int gp_size = sizeof(struct generic_packet);
 struct find_node_packet *fnp;
-const int fnp_size = sizeof(struct found_node_packet);
+const int fnp_size = sizeof(struct find_node_packet);
 struct found_node_packet *fonp;
 const int fonp_size = sizeof(struct found_node_packet);
 struct heartbeat_packet *hb;
@@ -104,7 +104,9 @@ int main(int argc, char const *argv[]) {
 	broadcastAddr = amalloc(&arena, addrLen);
 	selfAddr = amalloc(&arena, addrLen);
 
+	memset(emptyAddr, 0, addrLen);
 	set_broadcast_addr(HEARTBEAT_PORT, broadcastAddr);
+
 	struct ifaddrs *ifa = amalloc(&arena, sizeof(struct ifaddrs));
 	getInterface(ifa);
 	memcpy(selfAddr, ifa->ifa_addr, addrLen);
@@ -190,9 +192,8 @@ void handle_discover_fd(struct socketDetails *sd) {
 						nodeList[i].lastShouted = getCurrTime();
 						nodeList[i].nodeType = -1;
 						nodeList[i].UID = -1;
+						break;
 					}
-
-					sendHeartbeat();
 				}
 			} else {
 				int id = 0;
@@ -407,7 +408,7 @@ void sendRolePackets() {
 	printc(INFO, "monitor - sendRolePackets", "Sending role packets\n");
 
 	int assigners = getTotalNodes(ASSIGNER_NODE);
-	int workers = getTotalNodes(ASSIGNER_NODE);
+	int workers = getTotalNodes(WORKER_NODE);
 	int emptyNodes = getTotalNodes(EMPTY_NODE);
 	int monitors = getTotalNodes(MONITOR_NODE);
 	int gateways = getGlobalNodes(GATEWAY_NODE);
@@ -493,7 +494,7 @@ void sendRolePackets() {
 	}
 
 	// finally check for workers
-	if (demotionExpectedWorkers < workers && assigners > 0) {
+	if (demotionExpectedWorkers < workers && workers > 0) {
 		// too many workers
 		printc(IMP, "monitor - sendRolePackets", "Demoting workers: %d\n",
 			   workers - demotionExpectedWorkers);
@@ -534,6 +535,10 @@ void sendPromotePacket(int nodeType, int targetNodeType) {
 		}
 	}
 
+	if (node_addr == NULL) {
+		return;
+	}
+
 	deliverPromotePacket(nodeType, targetNodeType, node_addr);
 }
 
@@ -545,6 +550,7 @@ void sendPromotePacket(int nodeType, int targetNodeType) {
  */
 void sendDemotePackets(int nodeType, int nodes) {
 	int nodeCounts[monitorListLength];
+	memset(nodeCounts, 0, monitorListLength);
 	int i = 0;
 	int iters = 0;
 	while (1) {
@@ -601,7 +607,7 @@ void sendDemotePackets(int nodeType, int nodes) {
 void deliverPromotePacket(int promoted_node_type, int target_node_type,
 						  struct sockaddr_in *given_addr) {
 	pp->packet_ID = PACKET_ID;
-	pp->packet_type = DEMOTE_PACKET;
+	pp->packet_type = PROMOTE_PACKET;
 	pp->node_type = MONITOR_NODE;
 	pp->UID = UID;
 	pp->promoted_node_type = promoted_node_type;
