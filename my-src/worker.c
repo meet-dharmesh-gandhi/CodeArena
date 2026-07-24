@@ -101,6 +101,8 @@ int main(int argc, char const *argv[]) {
 	expectedConnectionsList = amalloc(&arena, expectedConnectionsListLength);
 	memset(expectedConnectionsList, 0, expectedConnectionsListSize);
 
+	fd_buf = amalloc(&arena, fdBuf_size);
+
 	monitor_last_shouted = amalloc(&arena, monitor_last_shouted_size);
 	memset(monitor_last_shouted, 0, monitor_last_shouted_size);
 	*monitor_last_shouted = -1;
@@ -528,6 +530,8 @@ void handle_hb_fd(struct socketDetails *sd) {
 			}
 		} else if (res != 2) {
 			break;
+		} else {
+			perror("res");
 		}
 	}
 }
