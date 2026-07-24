@@ -59,6 +59,8 @@ struct heartbeat_packet *hb;
 const int hb_size = sizeof(struct heartbeat_packet);
 struct find_monitor_packet *fmp;
 const int fmp_size = sizeof(struct find_monitor_packet);
+struct demotion_packet *dp;
+const int dp_size = sizeof(struct demotion_packet);
 
 struct IntermediateBuffer *getNodeIB(int fd);
 struct IntermediateBuffer *getIB();
@@ -172,6 +174,7 @@ int main(int argc, char const *argv[]) {
 	mhp = amalloc(&arena, mhp_size);
 	hb = amalloc(&arena, hb_size);
 	fmp = amalloc(&arena, fmp_size);
+	dp = amalloc(&arena, dp_size);
 
 	task_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
 	task_fd_sd->fd = task_fd;
@@ -237,12 +240,16 @@ void handle_role_fd(struct socketDetails *sd) {
 
 			if (packet_type == PROMOTE_PACKET) {
 				printc(IMP, "assigner - rolefd", "recved promote packet\n");
-				roleChanged = 1;
 				// this should not happen, no action defined yet
 			} else if (packet_type == DEMOTE_PACKET) {
-				printc(IMP, "assigner - rolefd", "recved demote packet\n");
-				morph(EMPTY_NODE, 1);
-				roleChanged = 1;
+				// copy to dp
+				memcpy(dp, fd_buf, dp_size);
+
+				if (dp->demoted_node_type == ASSIGNER_NODE) {
+					printc(IMP, "assigner - rolefd", "recved demote packet\n");
+					morph(EMPTY_NODE, 1);
+					roleChanged = 1;
+				}
 			}
 		} else if (res != 2) {
 			break;
@@ -855,13 +862,13 @@ void sendHeartbeat() {
 		return;
 	}
 
+	checkMonitor();
+
 	hb->packet_ID = PACKET_ID;
 	hb->packet_type = HEARTBEAT_PACKET;
 	hb->node_type = ASSIGNER_NODE;
 	hb->UID = UID;
 	hb->load = getCurrLoad();
-
-	checkMonitor();
 
 	if (memcmp(monitorAddr, emptyAddr, addrLen) == 0) {
 		printc(INFO, "assigner - sendHeartbeat", "Discovering monitor\n");
@@ -902,10 +909,15 @@ void checkMonitor() {
 			}
 		}
 
-		if (newMonitorAddr == NULL) {
+		if (newMonitorAddr != NULL) {
 			monitorAddr = newMonitorAddr;
+			return YES;
 		}
+
+		return NO;
 	}
+
+	return YES;
 }
 
 /**
@@ -949,16 +961,25 @@ void retryPackets() {
  * Adds a new monitor node to the monitor list
  */
 void addMonitorNode() {
+	if (memcmp(addr, emptyAddr, addrLen) == 0) {
+		return;
+	}
+
 	for (int i = 0; i < monitorListLength; i++) {
 		if (monitorList[i].filled == 0) {
 			printc(INFO, "assigner - addMonitorNode", "New Monitor added %s\n",
-				   getPrintableIP(&monitorList[i].addr));
+				   getPrintableIP(addr));
 			monitorList[i].filled = 1;
 			monitorList[i].nodeType = mhp->node_type;
 			monitorList[i].UID = mhp->UID;
 			monitorList[i].load = mhp->min_load_worker;
 			monitorList[i].lastShouted = getCurrTime();
 			memcpy(&monitorList[i].addr, addr, addrLen);
+
+			// check if current monitor is empty
+			if (memcmp(monitorAddr, emptyAddr, addrLen) == 0) {
+				monitorAddr = &monitorList[i].addr;
+			}
 			break;
 		}
 	}

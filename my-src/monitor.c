@@ -260,6 +260,7 @@ void handle_role_fd(struct socketDetails *sd) {
 					deliverPromotePacket(pp->promoted_node_type,
 										 pp->target_node_type,
 										 &nodeList[ind].addr);
+					nodeList[ind].filled = 0;
 				}
 			} else if (packet_type == DEMOTE_PACKET) {
 				// copy to dp
@@ -278,6 +279,7 @@ void handle_role_fd(struct socketDetails *sd) {
 							cnt++;
 							deliverDemotePacket(EMPTY_NODE, 1,
 												&nodeList[i].addr);
+							nodeList[i].filled = 0;
 						}
 					}
 				} else if (dp->demoted_node_type == MONITOR_NODE) {
@@ -529,8 +531,7 @@ void sendRolePackets() {
  * highest amount of `nodeType` nodes
  */
 void sendPromotePacket(int nodeType, int targetNodeType) {
-	int maxNodes = 0;
-	struct sockaddr_in *node_addr;
+	int maxNodes = -1;
 
 	printc(PRP, "monitor - sendPromotePacket",
 		   "Checking for monitor with maximum nodes: %d\n", nodeType);
@@ -538,23 +539,24 @@ void sendPromotePacket(int nodeType, int targetNodeType) {
 		if (monitorList[i].filled == 1) {
 			switch (nodeType) {
 			case WORKER_NODE:
-				if (maxNodes < monitorList[i].workers) {
-					maxNodes = monitorList[i].workers;
-					node_addr = &monitorList[i].addr;
+				if (maxNodes == -1 ||
+					monitorList[maxNodes].workers < monitorList[i].workers) {
+					maxNodes = i;
 					printc(IMP, "monitor - sendPromotePacket", "Found %s, %d\n",
-						   getPrintableIP(node_addr), maxNodes);
+						   getPrintableIP(&monitorList[i].addr), maxNodes);
 				}
 				break;
 			case EMPTY_NODE:
-				if (maxNodes <
-					monitorList[i].totalNodes - monitorList[i].assigners -
-						monitorList[i].workers - monitorList[i].gateways) {
+				if (maxNodes == -1 ||
+					(monitorList[maxNodes].totalNodes -
+						 monitorList[maxNodes].assigners -
+						 monitorList[maxNodes].workers -
+						 monitorList[maxNodes].gateways <
+					 monitorList[i].totalNodes - monitorList[i].assigners -
+						 monitorList[i].workers - monitorList[i].gateways)) {
+					maxNodes = i;
 					printc(IMP, "monitor - sendPromotePacket", "Found %s, %d\n",
 						   getPrintableIP(&monitorList[i].addr), maxNodes);
-					maxNodes = monitorList[i].totalNodes -
-							   monitorList[i].assigners -
-							   monitorList[i].workers - monitorList[i].gateways;
-					node_addr = &monitorList[i].addr;
 				}
 				break;
 			default:
@@ -563,14 +565,25 @@ void sendPromotePacket(int nodeType, int targetNodeType) {
 		}
 	}
 
-	if (node_addr == NULL || maxNodes <= 0) {
+	if (maxNodes < 0) {
 		return;
 	}
 
 	printc(INFO, "monitor - sendPromotePacket", "Final monitor: %s\n",
-		   getPrintableIP(node_addr));
+		   getPrintableIP(&monitorList[maxNodes].addr));
 
-	deliverPromotePacket(nodeType, targetNodeType, node_addr);
+	switch (nodeType) {
+	case WORKER_NODE:
+		monitorList[maxNodes].workers--;
+		break;
+	case EMPTY_NODE:
+		monitorList[maxNodes].totalNodes--;
+		break;
+	default:
+		break;
+	}
+
+	deliverPromotePacket(nodeType, targetNodeType, &monitorList[maxNodes].addr);
 }
 
 /**
@@ -629,6 +642,20 @@ void sendDemotePackets(int nodeType, int nodes) {
 
 	for (int i = 0; i < monitorListLength; i++) {
 		if (nodeCounts[i] > 0) {
+			switch (nodeType) {
+			case GATEWAY_NODE:
+				monitorList[i].gateways--;
+				break;
+			case ASSIGNER_NODE:
+				monitorList[i].assigners--;
+				break;
+			case WORKER_NODE:
+				monitorList[i].workers--;
+				break;
+			case MONITOR_NODE:
+				monitorList[i].filled = 0;
+				break;
+			}
 			deliverDemotePacket(nodeType, nodeCounts[i], &monitorList[i].addr);
 		}
 	}
@@ -822,7 +849,8 @@ void registerMonitorHeartbeat() {
 	} else if (nodeInd != NO) {
 		// existing monitor
 		printc(IMP, "monitor - registerMonitorHeartbeat",
-			   "Existing monitor: %s assigners: %d, gateways: %d, workers: %d, "
+			   "Existing monitor: %s assigners: %d, gateways: %d, workers: "
+			   "%d, "
 			   "total: %d\n",
 			   getPrintableIP(addr), mhb->assigners, mhb->gateways,
 			   mhb->workers, mhb->totalNodes);
