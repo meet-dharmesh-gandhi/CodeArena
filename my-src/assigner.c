@@ -965,23 +965,32 @@ void addMonitorNode() {
 		return;
 	}
 
+	int empty = -1;
 	for (int i = 0; i < monitorListLength; i++) {
-		if (monitorList[i].filled == 0) {
-			printc(INFO, "assigner - addMonitorNode", "New Monitor added %s\n",
+		if (monitorList[i].filled == 1 &&
+			memcmp(monitorAddr, &monitorList[i].addr, addrLen) == 0) {
+			printc(INFO, "assigner - monitorNode", "Existing monitor: %s\n",
 				   getPrintableIP(addr));
-			monitorList[i].filled = 1;
-			monitorList[i].nodeType = mhp->node_type;
-			monitorList[i].UID = mhp->UID;
 			monitorList[i].load = mhp->min_load_worker;
 			monitorList[i].lastShouted = getCurrTime();
-			memcpy(&monitorList[i].addr, addr, addrLen);
-
-			// check if current monitor is empty
-			if (memcmp(monitorAddr, emptyAddr, addrLen) == 0) {
-				monitorAddr = &monitorList[i].addr;
-			}
-			break;
+			return;
+		} else if (monitorList[i].filled == 0 && empty == -1) {
+			empty = i;
 		}
+	}
+
+	printc(INFO, "assigner - addMonitorNode", "New Monitor added %s\n",
+		   getPrintableIP(addr));
+	monitorList[empty].filled = 1;
+	monitorList[empty].nodeType = mhp->node_type;
+	monitorList[empty].UID = mhp->UID;
+	monitorList[empty].load = mhp->min_load_worker;
+	monitorList[empty].lastShouted = getCurrTime();
+	memcpy(&monitorList[empty].addr, addr, addrLen);
+
+	// check if current monitor is empty
+	if (memcmp(monitorAddr, emptyAddr, addrLen) == 0) {
+		monitorAddr = &monitorList[empty].addr;
 	}
 }
 
