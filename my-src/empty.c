@@ -31,6 +31,7 @@ const int fmp_size = sizeof(struct find_monitor_packet);
 
 struct socketDetails *role_timer_fd_sd, *role_fd_sd, *hb_fd_sd, *timer_fd_sd;
 int role_timer_on;
+int jitter;
 
 void handle_role_timer_fd(struct socketDetails *sd);
 void handle_timer_fd(struct socketDetails *sd);
@@ -43,6 +44,9 @@ int validPacket();
 // TODO Feature - If promotion nodes not available then make processes on the
 // same machine
 int main(int argc, char const *argv[]) {
+	setvbuf(stdout, NULL, _IONBF, 0);
+	setvbuf(stderr, NULL, _IONBF, 0);
+
 	UID = randInt(-1, MAX_UID);
 
 	if (UID == -1) {
@@ -66,6 +70,12 @@ int main(int argc, char const *argv[]) {
 	memset(monitorAddr, 0, addrLen);
 	set_broadcast_addr(DISCOVER_PORT, broadcastAddr);
 
+	struct sockaddr_in *selfAddr = amalloc(&arena, addrLen);
+	struct ifaddrs *ifa = amalloc(&arena, sizeof(struct ifaddrs));
+	getInterface(ifa);
+	memcpy(selfAddr, ifa->ifa_addr, addrLen);
+	printc(IMP, "empty", "My address: %s\n", getPrintableIP(selfAddr));
+
 	discover_fd = getNewSocket(DISCOVER_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
 	role_fd = getNewSocket(ROLE_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
 	hb_fd = getNewSocket(HEARTBEAT_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
@@ -73,8 +83,11 @@ int main(int argc, char const *argv[]) {
 	timer_fd = getNewTimerFD(CLOCK_MONOTONIC, HEARTBEAT_INTERVAL,
 							 HEARTBEAT_INTERVAL, 1);
 	// generates a jitter between 1000ms and 50ms
-	int jitter = getJitter(1000, 50);
-	role_timer_fd = getNewTimerFD(CLOCK_MONOTONIC, jitter, jitter, 1);
+	jitter = getJitter(1000, 50);
+	role_timer_fd = getNewTimerFD(CLOCK_MONOTONIC, 0, 0, 1);
+
+	drainSocket(role_fd, SOCK_DGRAM);
+	drainSocket(hb_fd, SOCK_DGRAM);
 
 	gp = amalloc(&arena, gp_size);
 	pp = amalloc(&arena, pp_size);
@@ -207,6 +220,7 @@ void sendHeartbeat() {
 		if (role_timer_on == 0) {
 			// add role_timer_fd to epoll
 			printc(IMP, "empty - sendHeartbeat", "Started role timer\n");
+			startTimerFD(role_timer_fd, jitter, jitter, 1);
 			addFDToEpoll(role_timer_fd,
 						 EPOLLET | EPOLLIN | EPOLLOUT | EPOLLONESHOT,
 						 role_timer_fd_sd);
@@ -219,6 +233,7 @@ void sendHeartbeat() {
 
 	if (role_timer_on == 1) {
 		printc(IMP, "empty - sendHeartbeat", "Ended role timer\n");
+		stopTimerFD(role_timer_fd);
 		deleteFDInEpoll(role_timer_fd);
 		role_timer_on = 0;
 	}
@@ -236,6 +251,8 @@ void sendHeartbeat() {
 void sendDiscoveryPacket() {
 	fmp->packet_ID = PACKET_ID;
 	fmp->packet_type = FIND_MONITOR_PACKET;
+	fmp->node_type = EMPTY_NODE;
+	fmp->UID = UID;
 
 	sendto(discover_fd, fmp, fmp_size, 0, broadcastAddr, addrLen);
 }

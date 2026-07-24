@@ -1,5 +1,6 @@
 #include "print.h"
 #include "constants.h"
+#include "utils.h"
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <stdarg.h>
@@ -20,7 +21,7 @@ void printcRaw(char *color, const char *prefix, const char *format,
 	}
 
 	printf(fColor);
-	printf("[%s] ", prefix);
+	printf("%ld [%s] ", getCurrTime(), prefix);
 
 	vprintf(format, args);
 
@@ -36,4 +37,8 @@ char *getPrintableIP(struct sockaddr_in *addr) {
 	} else {
 		return NULL;
 	}
+}
+
+uint16_t getPrintablePort(struct sockaddr_in *addr) {
+	return ntohs(addr->sin_port);
 }

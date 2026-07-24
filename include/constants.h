@@ -57,7 +57,7 @@ enum NodeTypes {
 #define WORKER_CAPACITY 5
 #define GATEWAY_CAPACITY 20
 #define STREAM_WAITING_QUEUE 10
-#define ARENA_SIZE 2048
+#define ARENA_SIZE 4096
 #define MAX_EVENTS                                                             \
 	6 // accounts for EPOLLIN, EPOLLOUT, EPOLLRDHUP, EPOLLHUP, EPOLLET, EPOLLERR
 
@@ -110,6 +110,8 @@ struct generic_packet {
 struct find_monitor_packet {
 	int packet_ID;
 	int packet_type;
+	int node_type;
+	int UID;
 };
 
 struct task_packet {

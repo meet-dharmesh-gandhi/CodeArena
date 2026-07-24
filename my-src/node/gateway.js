@@ -82,8 +82,8 @@ wss.on("connection", (ws) => {
 
 console.log("here - 1");
 
-server.listen(8000, "localhost", () => {
-	console.log("server listening on port 8000");
+server.listen(3000, "localhost", () => {
+	console.log("server listening on port 3000");
 });
 
 console.log("here 1");

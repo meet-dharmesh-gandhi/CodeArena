@@ -101,6 +101,9 @@ void handle_task_fd(struct socketDetails *sd);
 
 // TODO implemented memory conservation
 int main(int argc, char const *argv[]) {
+	setvbuf(stdout, NULL, _IONBF, 0);
+	setvbuf(stderr, NULL, _IONBF, 0);
+
 	UID = randInt(-1, MAX_UID);
 
 	if (UID == -1) {
@@ -130,6 +133,13 @@ int main(int argc, char const *argv[]) {
 	memset(monitorAddr, 0, addrLen);
 	set_broadcast_addr(DISCOVER_PORT, broadcastAddr);
 
+	printc(IMP, "assigner", "Getting self addr\n");
+	struct sockaddr_in *selfAddr = amalloc(&arena, addrLen);
+	struct ifaddrs *ifa = amalloc(&arena, sizeof(struct ifaddrs));
+	getInterface(ifa);
+	memcpy(selfAddr, ifa->ifa_addr, addrLen);
+	printc(IMP, "assigner", "My address: %s\n", getPrintableIP(selfAddr));
+
 	task_fd = getNewSocket(TASK_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
 	find_fd = getNewSocket(FIND_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
 	hb_fd = getNewSocket(HEARTBEAT_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
@@ -139,8 +149,15 @@ int main(int argc, char const *argv[]) {
 	gateway_fd = getNewSocket(TASK_PORT, SOCKET_TIMEOUT, SOCK_STREAM);
 	accept_worker_fd = getNewSocket(TASK_PORT, SOCKET_TIMEOUT, SOCK_STREAM);
 
+	printc(RED, "assigner", "accept_worker_fd: %d\n", accept_worker_fd);
+
 	timer_fd = getNewTimerFD(CLOCK_MONOTONIC, HEARTBEAT_INTERVAL,
 							 HEARTBEAT_INTERVAL, 1);
+
+	drainSocket(task_fd, SOCK_DGRAM);
+	drainSocket(find_fd, SOCK_DGRAM);
+	drainSocket(hb_fd, SOCK_DGRAM);
+	drainSocket(role_fd, SOCK_DGRAM);
 
 	fd_buf = amalloc(&arena, fdBufSize);
 
@@ -246,7 +263,10 @@ void handle_timer_fd(struct socketDetails *sd) {
 }
 
 void handle_accept_worker_fd(struct socketDetails *sd) {
-	if (sd->events & EPOLLIN) {
+	if (sd->events & EPOLLOUT) {
+		drainSocket(sd->fd, SOCK_STREAM);
+		modifyFDInEpoll(sd->fd, EPOLL_IN, sd);
+	} else if (sd->events & EPOLLIN) {
 		// new connection request(s)
 
 		while (1) {
@@ -854,6 +874,8 @@ void sendHeartbeat() {
 void sendFindMonitorPacket() {
 	fmp->packet_ID = PACKET_ID;
 	fmp->packet_type = FIND_MONITOR_PACKET;
+	fmp->node_type = ASSIGNER_NODE;
+	fmp->UID = UID;
 
 	printc(INFO, "assigner - sendFindMonitorPacket", "Finding monitor\n");
 	sendto(discover_fd, fmp, fmp_size, 0, broadcastAddr, addrLen);

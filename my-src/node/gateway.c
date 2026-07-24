@@ -128,6 +128,9 @@ napi_value Start(napi_env env, napi_value exports) {
 	// 	return exports;
 	// }
 
+	setvbuf(stdout, NULL, _IONBF, 0);
+	setvbuf(stderr, NULL, _IONBF, 0);
+
 	printc(INFO, "Start", "C code started running\n");
 
 	UID = randInt(-1, MAX_UID);
@@ -154,6 +157,12 @@ napi_value Start(napi_env env, napi_value exports) {
 	memset(monitorAddr, 0, addrLen);
 	set_broadcast_addr(DISCOVER_PORT, broadcastAddr);
 	addr = malloc(addrLen);
+
+	struct sockaddr_in *selfAddr = malloc(addrLen);
+	struct ifaddrs *ifa = malloc(sizeof(struct ifaddrs));
+	getInterface(ifa);
+	memcpy(selfAddr, ifa->ifa_addr, addrLen);
+	printc(IMP, "gateway", "My address: %s\n", getPrintableIP(selfAddr));
 
 	monitor_last_shouted = -1; // indicates the monitor was never found
 	ended = 0;
@@ -182,6 +191,11 @@ napi_value Start(napi_env env, napi_value exports) {
 	iop = malloc(iop_size);
 	fmp = malloc(fmp_size);
 	hp = malloc(hp_size);
+
+	drainSocket(hb_fd, SOCK_DGRAM);
+	drainSocket(find_fd, SOCK_DGRAM);
+	drainSocket(task_fd, SOCK_DGRAM);
+	drainSocket(discover_fd, SOCK_DGRAM);
 
 	uv_loop_t *node_loop = getUVLoop(env);
 	uv_poll_t *find_poll = malloc(sizeof(uv_poll_t));
@@ -310,13 +324,15 @@ void handle_hb_fd(uv_poll_t *handle, int status, int events) {
 		if (res == EXIT_SUCCESS) {
 			time_t currTime = getCurrTime();
 			if (memcmp(addr, monitorAddr, addrLen) == 0) {
-				printc(INFO, "Gateway - handle_hb_fd",
-					   "Existing monitor, %ld\n", currTime);
+				printc(INFO, "Gateway - handle_hb_fd", "Existing monitor, %s\n",
+					   getPrintableIP(addr));
 				monitor_last_shouted = currTime;
-			} else if (currTime - monitor_last_shouted > EXPIRE_PERIOD ||
-					   monitor_last_shouted == -1) {
+			} else if (hp->node_type == MONITOR_NODE &&
+					   (currTime - monitor_last_shouted > EXPIRE_PERIOD ||
+						monitor_last_shouted == -1)) {
 				printc(IMP, "gateway - handle_hb_fd",
-					   "New monitor heartbeat received?! %ld\n", currTime);
+					   "New monitor heartbeat received?! %s\n",
+					   getPrintableIP(addr));
 				monitor_last_shouted = currTime;
 				memcpy(monitorAddr, addr, addrLen);
 			}
@@ -349,6 +365,19 @@ void handle_accept_assigner_fd(uv_poll_t *handle, int status, int events) {
 			printc(RED, "Gateway - handle_accept_assigner_fd",
 				   "Accept error\n");
 			perror("accept");
+			continue;
+		}
+
+		// check if this was expected
+		int expected = 0;
+		for (int i = 0; i < expectedConnectionsListLength; i++) {
+			if (memcmp(&expectedConnectionsList[i].addr, addr, addrLen) == 0) {
+				expected = 1;
+				break;
+			}
+		}
+
+		if (expected == 0) {
 			continue;
 		}
 
@@ -800,6 +829,8 @@ void sendDiscoveryPacket() {
 
 	fmp->packet_ID = PACKET_ID;
 	fmp->packet_type = FIND_MONITOR_PACKET;
+	fmp->node_type = GATEWAY_NODE;
+	fmp->UID = UID;
 
 	sendto(discover_fd, fmp, fmp_size, 0, broadcastAddr, addrLen);
 }
@@ -968,8 +999,7 @@ void sendTaskPacket(int taskID) {
 	sendto(task_fd, tp, tp_size, 0, &fonp->addr, addrLen);
 
 	addToRetryList(task_fd, tp, tp_size, TASK_PACKET, &fonp->addr);
-	addToExpectedConnectionsList(&fonp->addr, TASK_PACKET,
-								 handle_accept_assigner_fd);
+	addToExpectedConnectionsList(&fonp->addr, TASK_PACKET, NULL);
 }
 
 void addToExpectedConnectionsList(struct sockaddr_in *given_addr,

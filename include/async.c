@@ -36,7 +36,10 @@ void startLoop(int max_events, int nfds, ...) {
 		struct socketDetails *sd = va_arg(args, struct socketDetails *);
 		ev.data.ptr = sd;
 		if (epoll_ctl(epollfd, EPOLL_CTL_ADD, sd->fd, &ev) != 0) {
-			printc(RED, "monitor", "Failed to add fd to interest list\n");
+			printc(RED, "startLoop",
+				   "Failed to add fd %d to interest list, errno: %s\n", i,
+				   strerror(errno));
+			perror("epoll");
 			return;
 		}
 	}

@@ -16,6 +16,7 @@ const int expectedConnectionsListSize =
 	sizeof(struct ExpectedConnection) * MONITOR_CAPACITY;
 
 int discover_fd, find_fd, hb_fd, role_fd, monitor_fd, timer_fd;
+int hb_cnt;
 
 uint8_t *fd_buf;
 const int fdBufSize = sizeof(uint8_t) * LARGEST_PACKET;
@@ -82,6 +83,9 @@ void handle_hb_fd(struct socketDetails *sd);
 void handle_find_fd(struct socketDetails *sd);
 
 int main(int argc, char const *argv[]) {
+	setvbuf(stdout, NULL, _IONBF, 0);
+	setvbuf(stderr, NULL, _IONBF, 0);
+
 	UID = UID = randInt(-1, MAX_UID);
 
 	if (UID == -1) {
@@ -117,8 +121,15 @@ int main(int argc, char const *argv[]) {
 	hb_fd = getNewSocket(HEARTBEAT_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
 	role_fd = getNewSocket(ROLE_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
 
-	timer_fd =
-		getNewTimerFD(CLOCK_MONOTONIC, EXPIRE_PERIOD, HEARTBEAT_INTERVAL, 1);
+	timer_fd = getNewTimerFD(CLOCK_MONOTONIC, HEARTBEAT_INTERVAL,
+							 HEARTBEAT_INTERVAL, 1);
+
+	hb_cnt = 0;
+
+	drainSocket(discover_fd, SOCK_DGRAM);
+	drainSocket(find_fd, SOCK_DGRAM);
+	drainSocket(hb_fd, SOCK_DGRAM);
+	drainSocket(role_fd, SOCK_DGRAM);
 
 	gp = amalloc(&arena, gp_size);
 	fnp = amalloc(&arena, fnp_size);
@@ -183,18 +194,17 @@ void handle_discover_fd(struct socketDetails *sd) {
 				// copy to fmp
 				memcpy(fmp, fd_buf, fmp_size);
 
-				for (int i = 0; i < nodeListLength; i++) {
-					printc(INFO, "monitor - handle_discover_fd",
-						   "Some discovery packet\n");
-					if (nodeList[i].filled == 0) {
-						nodeList[i].filled = 1;
-						memcpy(&nodeList[i].addr, addr, addrLen);
-						nodeList[i].lastShouted = getCurrTime();
-						nodeList[i].nodeType = -1;
-						nodeList[i].UID = -1;
-						break;
-					}
-				}
+				printc(INFO, "monitor - handle_discover_fd",
+					   "Some discovery packet %s %d\n", getPrintableIP(addr),
+					   fmp->node_type);
+
+				hb->packet_ID = fmp->packet_ID;
+				hb->packet_type = fmp->packet_type;
+				hb->node_type = fmp->node_type;
+				hb->UID = fmp->UID;
+				hb->load = 0;
+				registerNodeHeartbeat();
+				sendHeartbeat();
 			} else {
 				int id = 0;
 				memcpy(&id, fd_buf, sizeof(int));
@@ -218,6 +228,11 @@ void handle_timer_fd(struct socketDetails *sd) {
 	// cleanup
 	cleanUpNodes();
 
+	if (hb_cnt < 10) {
+		hb_cnt++;
+		return;
+	}
+
 	// send role packets
 	sendRolePackets();
 }
@@ -234,10 +249,17 @@ void handle_role_fd(struct socketDetails *sd) {
 				// copy to pp
 				memcpy(pp, fd_buf, pp_size);
 
+				printc(IMP, "monitor - handle_role_fd",
+					   "Got a promote packet: %d, become: %d\n",
+					   pp->promoted_node_type, pp->target_node_type);
 				int ind = getNode(pp->promoted_node_type);
 				if (ind != -1) {
-					sendto(role_fd, pp, pp_size, 0, &nodeList[ind].addr,
-						   addrLen);
+					printc(INFO, "monitor - handle_role_fd", "Found node: %s\n",
+						   getPrintableIP(&nodeList[ind].addr));
+					memcpy(addr, &nodeList[ind].addr, addrLen);
+					deliverPromotePacket(pp->promoted_node_type,
+										 pp->target_node_type,
+										 &nodeList[ind].addr);
 				}
 			} else if (packet_type == DEMOTE_PACKET) {
 				// copy to dp
@@ -407,10 +429,10 @@ void sendRolePackets() {
 
 	printc(INFO, "monitor - sendRolePackets", "Sending role packets\n");
 
-	int assigners = getTotalNodes(ASSIGNER_NODE);
-	int workers = getTotalNodes(WORKER_NODE);
-	int emptyNodes = getTotalNodes(EMPTY_NODE);
-	int monitors = getTotalNodes(MONITOR_NODE);
+	int assigners = getGlobalNodes(ASSIGNER_NODE);
+	int workers = getGlobalNodes(WORKER_NODE);
+	int emptyNodes = getGlobalNodes(EMPTY_NODE);
+	int monitors = getGlobalNodes(MONITOR_NODE);
 	int gateways = getGlobalNodes(GATEWAY_NODE);
 	int tasks = getGatewayLoad();
 
@@ -510,19 +532,25 @@ void sendPromotePacket(int nodeType, int targetNodeType) {
 	int maxNodes = 0;
 	struct sockaddr_in *node_addr;
 
+	printc(PRP, "monitor - sendPromotePacket",
+		   "Checking for monitor with maximum nodes: %d\n", nodeType);
 	for (int i = 0; i < monitorListLength; i++) {
 		if (monitorList[i].filled == 1) {
 			switch (nodeType) {
 			case WORKER_NODE:
-				if (maxNodes > monitorList[i].workers) {
+				if (maxNodes < monitorList[i].workers) {
 					maxNodes = monitorList[i].workers;
 					node_addr = &monitorList[i].addr;
+					printc(IMP, "monitor - sendPromotePacket", "Found %s, %d\n",
+						   getPrintableIP(node_addr), maxNodes);
 				}
 				break;
 			case EMPTY_NODE:
-				if (maxNodes >
+				if (maxNodes <
 					monitorList[i].totalNodes - monitorList[i].assigners -
 						monitorList[i].workers - monitorList[i].gateways) {
+					printc(IMP, "monitor - sendPromotePacket", "Found %s, %d\n",
+						   getPrintableIP(&monitorList[i].addr), maxNodes);
 					maxNodes = monitorList[i].totalNodes -
 							   monitorList[i].assigners -
 							   monitorList[i].workers - monitorList[i].gateways;
@@ -535,9 +563,12 @@ void sendPromotePacket(int nodeType, int targetNodeType) {
 		}
 	}
 
-	if (node_addr == NULL) {
+	if (node_addr == NULL || maxNodes <= 0) {
 		return;
 	}
+
+	printc(INFO, "monitor - sendPromotePacket", "Final monitor: %s\n",
+		   getPrintableIP(node_addr));
 
 	deliverPromotePacket(nodeType, targetNodeType, node_addr);
 }
@@ -597,7 +628,9 @@ void sendDemotePackets(int nodeType, int nodes) {
 	}
 
 	for (int i = 0; i < monitorListLength; i++) {
-		deliverDemotePacket(nodeType, nodeCounts[i], &monitorList[i].addr);
+		if (nodeCounts[i] > 0) {
+			deliverDemotePacket(nodeType, nodeCounts[i], &monitorList[i].addr);
+		}
 	}
 }
 
@@ -613,9 +646,12 @@ void deliverPromotePacket(int promoted_node_type, int target_node_type,
 	pp->promoted_node_type = promoted_node_type;
 	pp->target_node_type = target_node_type;
 
-	given_addr->sin_port = htons(atoi(ROLE_PORT));
+	struct sockaddr_in final_addr;
+	memcpy(&final_addr, given_addr, addrLen);
 
-	sendto(role_fd, pp, pp_size, 0, given_addr, addrLen);
+	final_addr.sin_port = htons(atoi(ROLE_PORT));
+
+	sendto(role_fd, pp, pp_size, 0, (struct sockaddr *)&final_addr, addrLen);
 }
 
 /**
@@ -664,6 +700,10 @@ int getGlobalNodes(int nodeType) {
 				break;
 			case WORKER_NODE:
 				cnt += monitorList[i].workers;
+				break;
+			case EMPTY_NODE:
+				cnt += monitorList[i].totalNodes - monitorList[i].gateways -
+					   monitorList[i].assigners - monitorList[i].workers;
 				break;
 			case MONITOR_NODE:
 				cnt++;
@@ -721,13 +761,6 @@ void sendHeartbeat() {
 
 	// broadcast the heartbeat
 	sendto(hb_fd, mhb, mhb_size, 0, broadcastAddr, addrLen);
-
-	// send hearbeat to all nodes
-	for (int i = 0; i < nodeListLength; i++) {
-		if (nodeList[i].filled == 1) {
-			sendto(hb_fd, mhb, mhb_size, 0, &nodeList[i].addr, addrLen);
-		}
-	}
 }
 
 /**
@@ -761,7 +794,7 @@ int getTotalNodes(int nodeType) {
  */
 void registerMonitorHeartbeat() {
 	// copy to mhb
-	memcpy(mhb, fd_buf, hb_size);
+	memcpy(mhb, fd_buf, mhb_size);
 
 	int emptyNode = isMonitorFull();
 
@@ -769,8 +802,11 @@ void registerMonitorHeartbeat() {
 
 	if (nodeInd == NO && emptyNode != YES) {
 		// new monitor
-		printc(IMP, "monitor - registerMonitorHeartbeat", "New monitor: %s\n",
-			   getPrintableIP(addr));
+		printc(IMP, "monitor - registerMonitorHeartbeat",
+			   "New monitor: %s assigners: %d, gateways: %d, workers: %d, "
+			   "total: %d\n",
+			   getPrintableIP(addr), mhb->assigners, mhb->gateways,
+			   mhb->workers, mhb->totalNodes);
 
 		monitorList[emptyNode].filled = 1;
 		monitorList[emptyNode].UID = mhb->UID;
@@ -783,14 +819,13 @@ void registerMonitorHeartbeat() {
 		monitorList[emptyNode].workers = mhb->workers;
 		monitorList[emptyNode].totalNodes = mhb->totalNodes;
 		monitorList[emptyNode].lastShouted = getCurrTime();
-		printc(IMP, "monitor - registerMonitorHeartbeat", "New monitor: %s\n",
-			   getPrintableIP(addr), mhb->assigners, mhb->gateways,
-			   mhb->workers, mhb->totalNodes);
 	} else if (nodeInd != NO) {
 		// existing monitor
 		printc(IMP, "monitor - registerMonitorHeartbeat",
-			   "Existing monitor: %s, %d %d %d %d\n", getPrintableIP(addr),
-			   mhb->assigners, mhb->gateways, mhb->workers, mhb->totalNodes);
+			   "Existing monitor: %s assigners: %d, gateways: %d, workers: %d, "
+			   "total: %d\n",
+			   getPrintableIP(addr), mhb->assigners, mhb->gateways,
+			   mhb->workers, mhb->totalNodes);
 		monitorList[nodeInd].min_load_assigner = mhb->min_load_assigner;
 		monitorList[nodeInd].min_load_worker = mhb->min_load_worker;
 		monitorList[nodeInd].gateway_load = mhb->gateway_load;
@@ -890,7 +925,8 @@ int findNode(struct sockaddr_in *given_addr) {
 
 	for (int i = 0; i < nodeListLength; i++) {
 		if (nodeList[i].filled == 1 &&
-			memcmp(&nodeList[i].addr, given_addr, addrLen) == 0) {
+			memcmp(&nodeList[i].addr.sin_addr.s_addr,
+				   &given_addr->sin_addr.s_addr, sizeof(in_addr_t)) == 0) {
 			return i;
 		}
 	}

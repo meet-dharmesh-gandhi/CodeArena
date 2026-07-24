@@ -2,10 +2,11 @@
 #include "constants.h"
 #include "print.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 
-char *paths[] = {"cd ./node && npm run dev", "./monitor", "./assigner",
-				 "./worker", "./empty"};
+char *paths[] = {"cd ./my-src/node && npm run dev", "./my-src/monitor",
+				 "./my-src/assigner", "./my-src/worker", "./my-src/empty"};
 
 void replace(char *str, int isPath);
 void change(char *str);
@@ -33,16 +34,25 @@ void morph(int nodeType, int morphType) {
 void replace(char *str, int isPath) {
 	if (isPath == 1) {
 		char *args[] = {str, NULL};
+		system("pwd");
+		system("ls");
+		system("ls my-src");
 		printc(INFO, "morph - replace", "Replacing with: %s\n", str);
+		fflush(stdout);
+		fflush(stderr);
 		execvp(args[0], args);
 	} else {
 		char *args[] = {"sh", "-c", str, NULL};
 		printc(INFO, "morph - replace", "Replacing with: %s\n", str);
+		fflush(stdout);
+		fflush(stderr);
 		execvp(args[0], args);
 	}
 
 	printc(RED, "morph - replace", "Unable to morph to %s\n", str);
 	perror("morph");
+	fflush(stdout);
+	fflush(stderr);
 }
 
 void change(char *str) {
@@ -54,6 +64,9 @@ void change(char *str) {
 		perror("fork");
 	} else if (pid == 0) {
 		char *args[] = {str, NULL};
+		printc(IMP, "morph - change - child", "Child process created!\n");
+		fflush(stdout);
+		fflush(stderr);
 		execvp(args[0], args);
 	}
 }

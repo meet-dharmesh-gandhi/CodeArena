@@ -2,6 +2,7 @@
 *
 !*.*
 !*/
+!Dockerfile
 
 **ignore**/
 **.ignore**
@@ -14,6 +15,7 @@
 /g++/**
 **/.vscode/**
 /err/**
+*logs*.txt
 
 **/build/**
 

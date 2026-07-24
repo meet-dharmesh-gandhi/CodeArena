@@ -2,6 +2,7 @@
 #include "constants.h"
 #include "print.h"
 #include <arpa/inet.h>
+#include <errno.h>
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <net/if_arp.h>
@@ -198,4 +199,31 @@ struct ifaddrs *getInterface(struct ifaddrs *req_ifa) {
 
 	freeifaddrs(ifs);
 	return req_ifa;
+}
+
+int drainSocket(int fd, int type) {
+	int bufSize = sizeof(int) * 100;
+	void *buf = malloc(bufSize);
+	struct sockaddr_in *addr = malloc(sizeof(struct sockaddr_in));
+	if (type == SOCK_DGRAM) {
+		while (1) {
+			if (recvfrom(fd, buf, bufSize, 0, (struct sockaddr *)addr,
+						 (socklen_t *)sizeof(struct sockaddr_in)) == -1) {
+				if (errno == EAGAIN || errno == EWOULDBLOCK) {
+					return YES;
+				}
+				return NO;
+			}
+		}
+	} else if (type == SOCK_STREAM) {
+		while (1) {
+			if (recv(fd, buf, bufSize, 0) == -1) {
+				if (errno == EAGAIN || errno == EWOULDBLOCK) {
+					return YES;
+				}
+				return NO;
+			}
+		}
+	}
+	return UNKNOWN;
 }
