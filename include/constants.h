@@ -94,6 +94,9 @@ enum NodeTypes {
 
 #define DISCOVER_PORT "8000" // to discover a monitor on start
 #define TASK_PORT "8001" // handles everything with task, tcp and udp sockets
+#define ASSIGNER_GATEWAY_TASK_PORT                                             \
+	"8005" // handles task tcp connections with gateway, only for the assigner
+		   // to use
 #define FIND_PORT                                                              \
 	"8002" // for getting assigner and worker addresses from monitor
 #define HEARTBEAT_PORT "8003" // for heartbeats simply

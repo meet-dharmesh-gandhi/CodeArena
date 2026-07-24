@@ -146,7 +146,8 @@ int main(int argc, char const *argv[]) {
 	role_fd = getNewSocket(ROLE_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
 	discover_fd = getNewSocket(DISCOVER_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
 
-	gateway_fd = getNewSocket(TASK_PORT, SOCKET_TIMEOUT, SOCK_STREAM);
+	gateway_fd =
+		getNewSocket(ASSIGNER_GATEWAY_TASK_PORT, SOCKET_TIMEOUT, SOCK_STREAM);
 	accept_worker_fd = getNewSocket(TASK_PORT, SOCKET_TIMEOUT, SOCK_STREAM);
 
 	printc(RED, "assigner", "accept_worker_fd: %d\n", accept_worker_fd);
@@ -216,7 +217,7 @@ int main(int argc, char const *argv[]) {
 
 	printc(INFO, "assigner - main", "starting event loop\n");
 
-	startLoop(MAX_EVENTS, 9, task_fd_sd, find_fd_sd, hb_fd_sd, role_fd_sd,
+	startLoop(MAX_EVENTS, 7, task_fd_sd, find_fd_sd, hb_fd_sd, role_fd_sd,
 			  gateway_fd_sd, accept_worker_fd_sd, timer_fd_sd);
 
 	printc(INFO, "assigner - main", "stopping event loop\n");
