@@ -15,15 +15,12 @@ console.log("Server starting...", cG.ok);
 
 const server = http.createServer((req, res) => {});
 
-console.log("Server started");
-
 const wss = new ws.WebSocketServer({ server });
 
 cG.init((path) => {
 	console.log("init called");
 	chdir("../../");
-	console.log(execSync("ls").toString());
-	console.log("ls printed...");
+	// console.log(execSync("ls").toString());
 	spawn(path);
 	const run = () => {
 		console.log("wss size", wss.clients.size);
@@ -37,26 +34,19 @@ cG.init((path) => {
 	setInterval(run, 1000);
 });
 
-console.log("wss created");
-
 let tasks = new Array(GATEWAY_CAPACITY);
-
-console.log("tasks created");
 
 wss.on("connection", (ws) => {
 	// tell c that a new connection has arrived
 	const taskID = cG.createTask(
 		(taskID) => {
-			console.log("here1");
 			ws.resume();
 		},
 		(taskID) => {
-			console.log("here2");
 			ws.close();
 			tasks[taskID] = null;
 		},
 		(buffer) => {
-			console.log("here3");
 			ws.send(buffer);
 
 			if (ws.bufferedAmount > WS_CAPACITY) {
@@ -88,10 +78,6 @@ wss.on("connection", (ws) => {
 	});
 });
 
-console.log("here - 1");
-
-server.listen(3000, "localhost", () => {
+server.listen(3000, "0.0.0.0", () => {
 	console.log("server listening on port 3000");
 });
-
-console.log("here 1");
