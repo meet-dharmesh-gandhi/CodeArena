@@ -38,7 +38,7 @@ let tasks = new Array(GATEWAY_CAPACITY);
 
 wss.on("connection", (ws) => {
 	// tell c that a new connection has arrived
-	const taskID = cG.createTask(
+	const taskID = cG.createTasks(
 		(taskID) => {
 			ws.resume();
 		},
