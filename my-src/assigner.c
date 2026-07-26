@@ -911,13 +911,8 @@ void checkMonitor() {
 
 		if (newMonitorAddr != NULL) {
 			monitorAddr = newMonitorAddr;
-			return YES;
 		}
-
-		return NO;
 	}
-
-	return YES;
 }
 
 /**
