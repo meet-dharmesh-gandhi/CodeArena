@@ -15,9 +15,9 @@ struct Task {
 	int client_buf_ptr;
 	size_t client_buf_size;
 	uv_poll_t poll_handle;
-	napi_value cb;
-	napi_value close_cb;
-	napi_value message_cb;
+	napi_ref cb;
+	napi_ref close_cb;
+	napi_ref message_cb;
 	napi_env env;
 };
 
@@ -72,7 +72,8 @@ const int hp_size = sizeof(struct heartbeat_packet);
 struct find_monitor_packet *fmp;
 const int fmp_size = sizeof(struct find_monitor_packet);
 
-napi_value end_cb;
+napi_ref end_cb;
+napi_env end_cb_env;
 int ended;
 
 int garp();
@@ -115,6 +116,7 @@ int addFDToNodeEpoll(uv_loop_t *node_loop, uv_poll_t *handle, int fd,
 					 int events, uv_poll_cb cb, uv_close_cb close_cb);
 int modifyFDInNodeEpoll(uv_poll_t *handle, int events, uv_poll_cb cb,
 						uv_close_cb close_cb);
+napi_value getNapiFunction(napi_env env, napi_ref cb_ref, napi_value *result);
 napi_value getNapiGlobal(napi_env env);
 napi_value napiBool(napi_env env, int boolean);
 napi_value napiInt32(napi_env env, int i);
@@ -414,9 +416,12 @@ void handle_assigner_fd_close(uv_handle_t *handle) {
 	printc(RED, "Gateway - handle_assigner_fd", "assigner disconnected\n");
 	// close the websocket
 	struct Task *t = (struct Task *)handle->data;
+	napi_handle_scope scope;
+	napi_open_handle_scope(t->env, &scope);
 	napi_value global;
 	napi_status status = napi_get_global(t->env, &global);
 	if (status != napi_ok) {
+		napi_close_handle_scope(t->env, scope);
 		return;
 	}
 
@@ -425,15 +430,19 @@ void handle_assigner_fd_close(uv_handle_t *handle) {
 
 	napi_value taskID;
 	napi_create_int32(t->env, t->taskID, &taskID);
+	napi_value close_cb;
+	getNapiFunction(t->env, t->close_cb, &close_cb);
 
-	status = napi_call_function(t->env, global, t->close_cb, 1, &taskID, NULL);
+	status = napi_call_function(t->env, global, close_cb, 1, &taskID, NULL);
 	if (status != napi_ok) {
+		napi_close_handle_scope(t->env, scope);
 		printNapiError(t->env, "handle_assigner_fd");
 		return;
 	}
 
 	t->filled = 0;
 	close(t->assigner_fd);
+	napi_close_handle_scope(t->env, scope);
 }
 
 void handle_find_fd_close(uv_handle_t *handle) {}
@@ -511,28 +520,35 @@ void handle_assigner_fd(uv_poll_t *handle, int status, int events) {
 								   MAX_DATA_CAPACITY);
 
 				if (required == 0) {
+					napi_handle_scope scope;
+					napi_open_handle_scope(t->env, &scope);
 					// now websocket can resume
 					napi_value global;
 					status = napi_get_global(t->env, &global);
 					if (status != napi_ok) {
 						printc(RED, "Gateway - handle_assigner_fd",
 							   "Could not get global\n");
+						napi_close_handle_scope(t->env, scope);
 						return;
 					}
 
 					napi_value taskID;
 					napi_create_int32(t->env, t->taskID, &taskID);
-					napi_status status = napi_call_function(
-						t->env, global, t->cb, 1, &taskID, NULL);
+					napi_value cb;
+					getNapiFunction(t->env, t->cb, &cb);
+					napi_status status = napi_call_function(t->env, global, cb,
+															1, &taskID, NULL);
 					if (status != napi_ok) {
 						printc(RED, "Gateway - handle_assigner_fd",
 							   "Call to cb failed\n");
+						napi_close_handle_scope(t->env, scope);
 						return;
 					}
 
 					modifyFDInNodeEpoll(&t->poll_handle, UV_READABLE,
 										handle_assigner_fd,
 										handle_assigner_fd_close);
+					napi_close_handle_scope(t->env, scope);
 				}
 
 				memcpy(t->assigner_buf, t->client_buf + t->client_buf_ptr,
@@ -578,21 +594,27 @@ void handle_assigner_fd(uv_poll_t *handle, int status, int events) {
 
 					memcpy(buffer_data, &iop->data, dataSize);
 
+					napi_handle_scope scope;
+					napi_open_handle_scope(t->env, &scope);
 					napi_value global = getNapiGlobal(t->env);
 					if (global == NULL) {
 						printc(RED, "Gateway - handle_assigner_fd",
 							   "Could not get global\n");
+						napi_close_handle_scope(t->env, scope);
 						return;
 					}
 
 					napi_value result;
-					status = napi_call_function(t->env, global, t->message_cb,
-												1, &buffer, &result);
+					napi_value message_cb;
+					getNapiFunction(t->env, t->message_cb, &message_cb);
+					status = napi_call_function(t->env, global, message_cb, 1,
+												&buffer, &result);
 					if (status != napi_ok) {
 						printc(RED, "Gateway - handle_assigner_fd",
 							   "Could not call message_cb\n");
 						printNapiError(t->env,
 									   "handle_assigner_fd - message_cb");
+						napi_close_handle_scope(t->env, scope);
 						return;
 					}
 
@@ -604,6 +626,7 @@ void handle_assigner_fd(uv_poll_t *handle, int status, int events) {
 						printNapiError(
 							t->env,
 							"handle_assigner_fd - return type message_cb");
+						napi_close_handle_scope(t->env, scope);
 						return;
 					}
 
@@ -614,6 +637,7 @@ void handle_assigner_fd(uv_poll_t *handle, int status, int events) {
 							   "Could not read boolean\n");
 						printNapiError(t->env, "handle_assigner_fd - return "
 											   "type message_cb extract");
+						napi_close_handle_scope(t->env, scope);
 						return;
 					}
 
@@ -623,6 +647,7 @@ void handle_assigner_fd(uv_poll_t *handle, int status, int events) {
 							   "WS filled\n");
 						uv_poll_stop(handle);
 					}
+					napi_close_handle_scope(t->env, scope);
 				}
 			}
 		}
@@ -650,7 +675,12 @@ napi_value Init(napi_env env, napi_callback_info info) {
 		return napiUndefined(env);
 	}
 
-	end_cb = args[0];
+	status = napi_create_reference(env, args[0], 1, &end_cb);
+	if (status != napi_ok) {
+		printNapiError(env, "Gateway - Init - end_cb");
+		return napiUndefined(env);
+	}
+	end_cb_env = env;
 	return napiUndefined(env);
 }
 
@@ -821,11 +851,11 @@ napi_value CreateTask(napi_env env, napi_callback_info info) {
 // -------------------- UTILS --------------------
 
 void sendDiscoveryPacket() {
-	printc(INFO, "Gateway - sendDiscoveryPacket",
-		   "Sending discovery packet, %d\n", monitor_last_shouted > 0 ? 1 : 0);
-	if (monitor_last_shouted > 0) {
+	if (monitor_last_shouted > 0 || ended == 1) {
 		return;
 	}
+
+	printc(INFO, "Gateway - sendDiscoveryPacket", "Sending discovery packet\n");
 
 	fmp->packet_ID = PACKET_ID;
 	fmp->packet_type = FIND_MONITOR_PACKET;
@@ -839,6 +869,7 @@ struct Task *addTask(napi_env env, napi_value cb, napi_value close_cb,
 					 napi_value message_cb) {
 	for (int i = 0; i < taskListLength; i++) {
 		if (taskList[i].filled == 0) {
+			napi_status status;
 			taskList[i].filled = 1;
 			taskList[i].taskID = i;
 			taskList[i].created_at = getCurrTime();
@@ -847,9 +878,26 @@ struct Task *addTask(napi_env env, napi_value cb, napi_value close_cb,
 			taskList[i].assigner_buf_ptr = 0;
 			taskList[i].assigner_fd = -1;
 			taskList[i].env = env;
-			taskList[i].cb = cb;
-			taskList[i].close_cb = close_cb;
-			taskList[i].message_cb = message_cb;
+			status = napi_create_reference(env, cb, 1, &taskList[i].cb);
+			if (status != napi_ok) {
+				taskList[i].filled = 0;
+				printNapiError(env, "Gatway - addTask - cb");
+				return NULL;
+			}
+			status =
+				napi_create_reference(env, close_cb, 1, &taskList[i].close_cb);
+			if (status != napi_ok) {
+				taskList[i].filled = 0;
+				printNapiError(env, "Gatway - addTask - close_cb");
+				return NULL;
+			}
+			status = napi_create_reference(env, message_cb, 1,
+										   &taskList[i].message_cb);
+			if (status != napi_ok) {
+				taskList[i].filled = 0;
+				printNapiError(env, "Gatway - addTask - message_cb");
+				return NULL;
+			}
 			return &taskList[i];
 		}
 	}
@@ -864,22 +912,19 @@ void checkMonitor() {
 		printc(
 			ERR, "gateway - checkMonitor",
 			"Becoming an empty node, monitor did not reply for a long time\n");
-		for (int i = 0; i < taskListLength; i++) {
-			if (taskList[i].filled == 1 && taskList[i].env != NULL) {
-				printc(INFO, "Gateway - checkMonitor",
-					   "Calling end function\n");
-				napi_value global = getNapiGlobal(taskList[i].env);
-				printc(IMP, "Gateway - checkMonitor", "is global: %d\n",
-					   global == NULL);
-				napi_call_function(taskList[i].env,
-								   getNapiGlobal(taskList[i].env), end_cb, 0,
-								   NULL, NULL);
-				printc(INFO, "Gateway - checkMonitor", "Called end function\n");
-				ended = 1;
-				printc(INFO, "Gateway - checkMonitor", "Called end function\n");
-				return;
-			}
-		}
+
+		napi_handle_scope scope;
+		napi_open_handle_scope(end_cb_env, &scope);
+		printc(INFO, "Gateway - checkMonitor", "Calling end function\n");
+		napi_value path;
+		napi_create_string_utf8(end_cb_env, EMPTY_NODE_PATH, NAPI_AUTO_LENGTH,
+								&path);
+		napi_value end_fn;
+		getNapiFunction(end_cb_env, end_cb, &end_fn);
+		napi_call_function(end_cb_env, getNapiGlobal(end_cb_env), end_fn, 1,
+						   &path, NULL);
+		napi_close_handle_scope(end_cb_env, scope);
+		ended = 1;
 	}
 }
 
@@ -1081,6 +1126,16 @@ int modifyFDInNodeEpoll(uv_poll_t *handle, int events, uv_poll_cb cb,
 	}
 
 	return YES;
+}
+
+napi_value getNapiFunction(napi_env env, napi_ref cb_ref, napi_value *result) {
+	napi_status status = napi_get_reference_value(env, cb_ref, result);
+	if (status != napi_ok) {
+		printNapiError(env, "Gateway - getNapiFunction");
+		return napiUndefined(env);
+	}
+
+	return *result;
 }
 
 napi_value getNapiGlobal(napi_env env) {

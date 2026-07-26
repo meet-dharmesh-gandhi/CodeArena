@@ -81,6 +81,11 @@ enum NodeTypes {
 #define DEMOTE_ASSIGNER_THRESHOLD (int)((ASSIGNER_CAPACITY * 40) / 100)
 #define DEMOTE_MONITOR_THRESHOLD (int)((MONITOR_CAPACITY * 40) / 100)
 
+#define EMPTY_NODE_PATH "./my-src/empty"
+#define MONITOR_NODE_PATH "./my-src/monitor"
+#define ASSIGNER_NODE_PATH "./my-src/assigner"
+#define WORKER_NODE_PATH "./my-src/worker"
+
 #define MIN_WORKERS 1
 #define MIN_ASSIGNERS 2
 #define MIN_MONITORS 1

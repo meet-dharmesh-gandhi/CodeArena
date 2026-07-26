@@ -5,8 +5,8 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-char *paths[] = {"cd ./my-src/node && npm run dev", "./my-src/monitor",
-				 "./my-src/assigner", "./my-src/worker", "./my-src/empty"};
+char *paths[] = {"cd ./my-src/node && npm run dev", MONITOR_NODE_PATH,
+				 ASSIGNER_NODE_PATH, WORKER_NODE_PATH, EMPTY_NODE_PATH};
 
 void replace(char *str, int isPath);
 void change(char *str);
