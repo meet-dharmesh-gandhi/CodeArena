@@ -238,6 +238,7 @@ struct RetryPacket {
 	int packet_size;
 	time_t last_sent;
 	struct sockaddr_in addr;
+	in_port_t port;
 	uint8_t packet[LARGEST_PACKET];
 };
 

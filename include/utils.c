@@ -178,3 +178,5 @@ void stopTimerFD(int timerfd) {
 	utmr.it_interval.tv_nsec = 0;
 	timerfd_settime(timerfd, 0, &utmr, NULL);
 }
+
+int getPort(char *port) { return htons(atoi(port)); }

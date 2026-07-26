@@ -746,6 +746,7 @@ void sendHeartbeat() {
 	printc(INFO, "worker - sendHeartbeat", "Sending heartbeat, load: %d\n",
 		   hb->load);
 
+	monitorAddr->sin_port = getPort(HEARTBEAT_PORT);
 	sendto(hb_fd, hb, hb_size, 0, monitorAddr, addrLen);
 }
 
@@ -772,6 +773,7 @@ void sendDiscoveryPacket() {
 	fmp->node_type = WORKER_NODE;
 	fmp->UID = UID;
 
+	broadcastAddr->sin_port = getPort(DISCOVER_PORT);
 	sendto(discover_fd, fmp, fmp_size, 0, broadcastAddr, addrLen);
 }
 
@@ -858,6 +860,7 @@ void sendCancelTaskPacket(int taskID, struct sockaddr_in *given_addr) {
 	ctp->UID = UID;
 	ctp->taskID = taskID;
 
+	given_addr->sin_port = getPort(TASK_PORT);
 	sendto(task_fd, ctp, ctp_size, 0, given_addr, addrLen);
 }
 

@@ -243,6 +243,7 @@ void sendHeartbeat() {
 	hp->node_type = EMPTY_NODE;
 	hp->UID = UID;
 
+	monitorAddr->sin_port = getPort(HEARTBEAT_PORT);
 	sendto(hb_fd, hp, hp_size, 0, monitorAddr, addrLen);
 
 	printc(INFO, "empty - sendHeartbeat", "Sent heartbeat\n");
@@ -254,6 +255,7 @@ void sendDiscoveryPacket() {
 	fmp->node_type = EMPTY_NODE;
 	fmp->UID = UID;
 
+	broadcastAddr->sin_port = getPort(DISCOVER_PORT);
 	sendto(discover_fd, fmp, fmp_size, 0, broadcastAddr, addrLen);
 }
 

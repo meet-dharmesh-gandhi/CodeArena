@@ -22,5 +22,6 @@ extern int getNewTimerFD(clockid_t __clock_id, long interval, long period,
 extern void startTimerFD(int timerfd, long interval, long period, int isMs);
 extern void stopTimerFD(int timerfd);
 extern int getJitter(int maxJitter, int minJitter);
+extern int getPort(char *port);
 
 #endif

@@ -676,8 +676,7 @@ void deliverPromotePacket(int promoted_node_type, int target_node_type,
 	struct sockaddr_in final_addr;
 	memcpy(&final_addr, given_addr, addrLen);
 
-	final_addr.sin_port = htons(atoi(ROLE_PORT));
-
+	final_addr.sin_port = getPort(ROLE_PORT);
 	sendto(role_fd, pp, pp_size, 0, (struct sockaddr *)&final_addr, addrLen);
 }
 
@@ -693,8 +692,7 @@ void deliverDemotePacket(int demoted_node_type, int nodes_to_demote,
 	dp->nodes_to_demote = nodes_to_demote;
 	dp->demoted_node_type = demoted_node_type;
 
-	given_addr->sin_port = htons(atoi(ROLE_PORT));
-
+	given_addr->sin_port = getPort(ROLE_PORT);
 	sendto(role_fd, dp, dp_size, 0, given_addr, addrLen);
 }
 
@@ -787,6 +785,7 @@ void sendHeartbeat() {
 		   mhb->workers, mhb->gateways, mhb->totalNodes, mhb->gateway_load);
 
 	// broadcast the heartbeat
+	broadcastAddr->sin_port = getPort(HEARTBEAT_PORT);
 	sendto(hb_fd, mhb, mhb_size, 0, broadcastAddr, addrLen);
 }
 
@@ -1032,6 +1031,7 @@ void sendFoundNodePacket(int is_monitor, struct sockaddr_in *node_addr,
 	fonp->is_monitor = is_monitor;
 	memcpy(&fonp->addr, node_addr, addrLen);
 
+	given_addr->sin_port = getPort(FIND_PORT);
 	sendto(find_fd, fonp, fonp_size, 0, given_addr, addrLen);
 }
 

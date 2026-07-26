@@ -876,6 +876,7 @@ void sendHeartbeat() {
 		return;
 	}
 
+	monitorAddr->sin_port = getPort(HEARTBEAT_PORT);
 	sendto(hb_fd, hb, hb_size, 0, monitorAddr, addrLen);
 }
 
@@ -886,6 +887,7 @@ void sendFindMonitorPacket() {
 	fmp->UID = UID;
 
 	printc(INFO, "assigner - sendFindMonitorPacket", "Finding monitor\n");
+	broadcastAddr->sin_port = getPort(DISCOVER_PORT);
 	sendto(discover_fd, fmp, fmp_size, 0, broadcastAddr, addrLen);
 }
 
@@ -1130,6 +1132,7 @@ int sendTaskPacket(int taskID, struct sockaddr_in *given_addr) {
 	tp->UID = UID;
 	tp->taskID = taskID;
 
+	given_addr->sin_port = getPort(TASK_PORT);
 	int sent = sendto(task_fd, tp, tp_size, 0, given_addr, addrLen);
 
 	if (sent <= 0) {
@@ -1289,6 +1292,7 @@ int sendFindNodePacket(struct sockaddr_in *given_addr, int was_redirected,
 	printc(INFO, "assigner - sendFindNodePacket",
 		   "Sending Find Node Packet, target: %d\n", target_node_type);
 
+	given_addr->sin_port = getPort(FIND_PORT);
 	int sent = sendto(find_fd, fnp, fnp_size, 0, given_addr, addrLen);
 
 	if (add_to_retry == 1) {

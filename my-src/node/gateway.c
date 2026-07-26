@@ -464,12 +464,13 @@ void handle_find_fd(uv_poll_t *handle, int status, int events) {
 			}
 
 			// remove from retryList
-			if (removeFromRetryList(find_fd, fonp->packet_type, fonp_size) ==
+			if (removeFromRetryList(find_fd, FIND_NODE_PACKET, fnp_size) ==
 				NO) {
 				printc(RED, "Gateway - handle_find_fd",
 					   "Not found in retry list\n");
 				continue;
 			}
+
 			for (int i = 0; i < taskListLength; i++) {
 				if (taskList[i].filled == 1 && taskList[i].assigner_fd == -1) {
 					// send task packet to assigner
@@ -862,6 +863,7 @@ void sendDiscoveryPacket() {
 	fmp->node_type = GATEWAY_NODE;
 	fmp->UID = UID;
 
+	broadcastAddr->sin_port = getPort(DISCOVER_PORT);
 	sendto(discover_fd, fmp, fmp_size, 0, broadcastAddr, addrLen);
 }
 
@@ -947,6 +949,7 @@ void sendHeartbeat() {
 	hp->load = getNumberOfTasks();
 	printc(INFO, "Gateway - sendHeartbeat", "Sending heartbeat to %s\n",
 		   getPrintableIP(monitorAddr));
+	monitorAddr->sin_port = getPort(HEARTBEAT_PORT);
 	sendto(hb_fd, hp, hp_size, 0, monitorAddr, addrLen);
 }
 
@@ -995,6 +998,7 @@ void sendFindNodePacket(int shouldRetry) {
 	fnp->node_type = GATEWAY_NODE;
 	fnp->UID = UID;
 	fnp->was_redirected = 0;
+	monitorAddr->sin_port = getPort(FIND_PORT);
 	sendto(find_fd, fnp, fnp_size, 0, monitorAddr, addrLen);
 
 	if (shouldRetry) {
@@ -1041,6 +1045,7 @@ void sendTaskPacket(int taskID) {
 	tp->node_type = GATEWAY_NODE;
 	tp->UID = UID;
 	tp->taskID = taskID;
+	fonp->addr.sin_port = getPort(TASK_PORT);
 	sendto(task_fd, tp, tp_size, 0, &fonp->addr, addrLen);
 
 	addToRetryList(task_fd, tp, tp_size, TASK_PACKET, &fonp->addr);
