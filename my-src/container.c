@@ -1,4 +1,5 @@
 #include "../include/all.h"
+#include <asm/termbits.h>
 
 /**
  * IO Packet Format:
@@ -33,18 +34,25 @@ uint8_t n_files;
 uint8_t *buf;
 char *filename;
 
-int createFile(int container_fd);
+struct termios raw, orig;
+
+int createFile(int slave_fd);
 void connectFD(int source_fd, int target_fd);
+void createTerminal();
+void toRaw(int fd);
+void toOrig(int fd);
 
 // TODO add limits to the container
 int run_container(void *arg) {
 	printc(INFO, "container - run_container", "Container started\n");
-	int container_fd = *(int *)arg;
+	int slave_fd = *(int *)arg;
 	buf = malloc(MAX_FILE_SIZE);
 	filename = malloc(MAX_FILENAME_SIZE + 1);
 
+	toRaw(slave_fd);
+
 	int required = sizeof(uint8_t);
-	int recved = recvFull(container_fd, buf, required, 0);
+	int recved = readFull(slave_fd, buf, required);
 
 	if (recved == EXIT_FAILURE) {
 		printc(RED, "container - runContainer", "recved exit failure\n");
@@ -64,7 +72,7 @@ int run_container(void *arg) {
 	}
 
 	for (int i = 0; i < n_files; i++) {
-		createFile(container_fd);
+		createFile(slave_fd);
 	}
 
 	free(buf);
@@ -72,10 +80,17 @@ int run_container(void *arg) {
 
 	printc(INFO, "container - run_container", "Files created\n");
 
+	toOrig(slave_fd);
+
 	// all files created, now connect the input and output to the socket
-	connectFD(container_fd, STDIN_FILENO);
-	connectFD(container_fd, STDOUT_FILENO);
-	connectFD(container_fd, STDERR_FILENO);
+	dup2(slave_fd, STDIN_FILENO);
+	dup2(slave_fd, STDOUT_FILENO);
+	dup2(slave_fd, STDERR_FILENO);
+
+	close(slave_fd);
+
+	// execl("/usr/bin/stdbuf", "stdbuf", "-i0", "-o0", "-e0", "/bin/sh", NULL);
+	// execl("/bin/sh", "sh", "-i", NULL);
 
 	execl("/bin/sh", "sh", NULL);
 
@@ -83,6 +98,64 @@ int run_container(void *arg) {
 	perror("execl");
 
 	exit(1);
+}
+
+void toRaw(int fd) {
+	if (ioctl(fd, TCGETS, &orig) == -1) {
+		perror("TCGETS");
+		return;
+	}
+
+	raw = orig;
+
+	raw.c_iflag &=
+		~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL | IXON);
+	raw.c_oflag &= ~(OPOST);
+	raw.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
+	raw.c_cflag &= ~(CSIZE | PARENB);
+	raw.c_cflag |= CS8;
+
+	if (ioctl(fd, TCSETS, &raw) == -1) {
+		perror("TCSETS");
+		return;
+	}
+}
+
+void toOrig(int fd) {
+	if (ioctl(fd, TCSETS, &orig) == -1) {
+		perror("TCSETS toOrig");
+		return;
+	}
+}
+
+void createTerminal() {
+	int master_fd = posix_openpt(O_RDWR | O_NOCTTY);
+	if (master_fd < 0) {
+		printc(RED, "container - createTerminal", "master_fd failed\n");
+		perror("master_fd");
+		return;
+	}
+
+	grantpt(master_fd);
+	unlockpt(master_fd);
+
+	char *slave_name = ptsname(master_fd);
+
+	pid_t pid = fork();
+
+	if (pid == 0) {
+		close(master_fd);
+
+		int slave_fd = open(slave_name, O_RDWR);
+
+		dup2(slave_fd, STDIN_FILENO);
+		dup2(slave_fd, STDOUT_FILENO);
+		dup2(slave_fd, STDERR_FILENO);
+
+		close(slave_fd);
+
+		execl("/bin/sh", "sh", NULL);
+	}
 }
 
 void connectFD(int source_fd, int target_fd) {
@@ -93,7 +166,7 @@ void connectFD(int source_fd, int target_fd) {
 	}
 }
 
-int createFile(int container_fd) {
+int createFile(int slave_fd) {
 	printc(INFO, "container - createFile", "Creating File\n");
 	uint8_t filename_size = 0;
 	uint32_t file_size = 0;
@@ -103,7 +176,7 @@ int createFile(int container_fd) {
 
 	// first get filename size - 1 byte
 	required = sizeof(uint8_t);
-	recved = recvFull(container_fd, buf, required, 0);
+	recved = readFull(slave_fd, buf, required);
 
 	if (recved == EXIT_FAILURE) {
 		printc(ERR, "container - createFile", "Could not get filename size\n");
@@ -122,7 +195,7 @@ int createFile(int container_fd) {
 
 	// next get the filename
 	required = filename_size;
-	recved = recvFull(container_fd, buf, required, 0);
+	recved = readFull(slave_fd, buf, required);
 
 	if (recved == EXIT_FAILURE) {
 		printc(ERR, "container - createFile", "Could not get filename\n");
@@ -137,7 +210,7 @@ int createFile(int container_fd) {
 
 	// next get file size
 	required = sizeof(uint32_t);
-	recved = recvFull(container_fd, buf, required, 0);
+	recved = readFull(slave_fd, buf, required);
 
 	if (recved == EXIT_FAILURE) {
 		printc(ERR, "container - createFile", "Could not get file size\n");
@@ -158,7 +231,7 @@ int createFile(int container_fd) {
 
 	// next get the file content
 	required = file_size;
-	recved = recvFull(container_fd, buf, required, 0);
+	recved = readFull(slave_fd, buf, required);
 
 	if (recved == EXIT_FAILURE) {
 		printc(ERR, "container - createFile", "Could not get file\n");

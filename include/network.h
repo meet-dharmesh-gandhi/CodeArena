@@ -5,6 +5,7 @@
 
 extern int sendFull(int __fd, const void *__buf, size_t __n, int __flags);
 extern int recvFull(int __fd, const void *__buf, size_t __n, int __flags);
+extern int readFull(int __fd, const void *__buf, size_t __n);
 extern int setNonBlocking(int fd);
 extern int createSocket(const char *port_number, int waiting_queue,
 						int sock_type, const int option_count, ...);

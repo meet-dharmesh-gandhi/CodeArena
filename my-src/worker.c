@@ -283,8 +283,8 @@ void handle_container(struct socketDetails *sd) {
 				printc(INFO, "worker - handle_container", "Task %d\n", i);
 				struct TaskDetail *t = &taskList[i];
 				int required = t->top_filled - t->top_buf_ptr;
-				int sent = send(t->bottom_fd, &t->top_buf + t->top_buf_ptr,
-								required, 0);
+				int sent =
+					write(t->bottom_fd, &t->top_buf + t->top_buf_ptr, required);
 
 				if (sent < required) {
 					t->top_buf_ptr += max(sent, 0);
@@ -305,7 +305,7 @@ void handle_container(struct socketDetails *sd) {
 											iop, &aIb->filled);
 
 						if (done == YES) {
-							int sent = send(t->bottom_fd, iop, aIb->filled, 0);
+							int sent = write(t->bottom_fd, iop, aIb->filled);
 
 							if (sent < aIb->filled) {
 								memcpy(t->top_buf, aIb->buf, aIb->filled);
@@ -366,25 +366,30 @@ void handle_container(struct socketDetails *sd) {
 		// incoming data, forward to assigner
 		while (1) {
 			printc(INFO, "worker - handle_container", "EPOLLIN\n");
-			int bufFull = 0;
+			ib->buf_ptr = 0;
 			while (1) {
 				int required = MAX_DATA_CAPACITY - ib->buf_ptr;
 				if (required == 0) {
-					bufFull = 1;
 					break;
 				}
 
-				int recved = recv(sd->fd, ib->buf + ib->buf_ptr, required, 0);
+				int recved = read(sd->fd, ib->buf + ib->buf_ptr, required);
+				printc(INFO, "worker - handle_container", "recved: %d\n",
+					   recved);
 
 				if (recved == -1 && (errno == EWOULDBLOCK || errno == EAGAIN)) {
+					printc(INFO, "worker - handle_container",
+						   "socket drained\n");
 					break;
 				} else if (recved == -1) {
 					printc(RED, "worker - handle_container",
 						   "Socket unknown error, recved: %d, errno: %d\n",
 						   recved, errno);
-					perror("UDS");
+					perror("PTY");
 					break;
 				}
+
+				ib->buf_ptr += recved;
 			}
 
 			int taskID = getContainerTaskID(sd->fd);
@@ -396,6 +401,8 @@ void handle_container(struct socketDetails *sd) {
 				return;
 			}
 
+			printc(INFO, "worker - handle_container", "taskID: %d\n", taskID);
+
 			ib->filled = ib->buf_ptr;
 			struct TaskDetail *t = &taskList[taskID];
 
@@ -404,21 +411,33 @@ void handle_container(struct socketDetails *sd) {
 			iop->node_type = WORKER_NODE;
 			iop->UID = UID;
 			iop->task_ID = taskID;
+			iop->data_size = ib->filled;
 			memcpy(&iop->data, &ib->buf, ib->filled);
+
+			printc(INFO, "worker - handle_container", "data: ");
+			for (int i = 0; i < ib->filled; i++) {
+				printf("%x ", ib->buf[i]);
+			}
+			printf("|\n");
 
 			ib->buf_ptr = 0;
 
 			int sent = send(t->top_fd, iop, ib->filled, 0);
+			printc(INFO, "worker - handle_container", "sent data size: %d\n",
+				   iop->data_size);
 
 			if (sent < ib->filled) {
+				printc(INFO, "worker - handle_container",
+					   "could send only: %d, maybe error: %d\n", sent, errno);
 				memcpy(&t->bottom_buf, iop, ib->filled);
 				t->bottom_buf_ptr += max(sent, 0);
 				t->bottom_filled = ib->filled;
 
 				modifyFDInEpoll(sd->fd, EPOLL_OUT | EPOLL_DESTROY, sd);
+				break;
 			}
 
-			if (bufFull == 0) {
+			if (ib->buf_ptr != MAX_DATA_CAPACITY) {
 				break;
 			}
 		}
@@ -494,9 +513,8 @@ void handle_assigner_fd(struct socketDetails *sd) {
 							break;
 						}
 
-						int recved =
-							recv(t->bottom_fd, &wIb->buf + wIb->buf_ptr,
-								 required, 0);
+						int recved = read(t->bottom_fd,
+										  &wIb->buf + wIb->buf_ptr, required);
 
 						if (recved == -1 &&
 							(errno == EWOULDBLOCK || errno == EAGAIN)) {
@@ -570,7 +588,7 @@ void handle_assigner_fd(struct socketDetails *sd) {
 					printc(INFO, "worker - handle_assigner_fd",
 						   "IO Packet, task: %d\n", iop->task_ID);
 					struct TaskDetail *t = &taskList[iop->task_ID];
-					int sent = send(t->bottom_fd, iop->data, ib->filled, 0);
+					int sent = write(t->bottom_fd, iop->data, ib->filled);
 
 					if (sent < ib->filled) {
 						t->bottom_buf_ptr = max(sent, 0);
@@ -685,18 +703,8 @@ void handle_task_fd(struct socketDetails *sd) {
 // -------------------- UTILS --------------------
 
 void killContainer(int fd) {
-	struct ucred creds;
-	socklen_t ucred_len = sizeof(struct ucred);
-
-	if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &creds, &ucred_len) == -1) {
-		printc(ERR, "worker - killContainer", "Could not kill container\n");
-		return;
-	}
-
-	if (kill(creds.pid, SIGKILL) != 0) {
-		printc(ERR, "worker - killContainer", "Kill call failed\n");
-		perror("kill");
-	}
+	// works great on pty fds
+	close(fd);
 }
 
 int getContainerTaskID(int fd) {
@@ -758,18 +766,22 @@ void sendTaskOverPacket(int fd) {
 void createContainer(struct TaskDetail *t) {
 	printc(INFO, "worker - createContainer",
 		   "Creating container for task: %d\n", tp->taskID);
-	int uds[2];
+	int master_fd = posix_openpt(O_RDWR | O_NOCTTY);
+	if (master_fd < 0) {
+		printc(RED, "container - createTerminal", "master_fd failed\n");
+		perror("master_fd");
+		return;
+	}
+
+	grantpt(master_fd);
+	unlockpt(master_fd);
+
+	char *slave_name = ptsname(master_fd);
+
+	int slave_fd = open(slave_name, O_RDWR);
 
 	uid_t uid = getuid();
 	gid_t gid = getgid();
-
-	// create uds
-	if (socketpair(AF_UNIX, SOCK_STREAM, 0, uds) == -1) {
-		// uds was not created
-		printc(ERR, "worker - createContainer", "Could not create UDS\n");
-		perror("UDS");
-		return;
-	}
 
 	// allocate the stack
 	uint8_t *stack = malloc(sizeof(uint8_t) * CONTAINER_STACK_SIZE);
@@ -779,7 +791,7 @@ void createContainer(struct TaskDetail *t) {
 	int container_pid = clone(&run_container, stack + CONTAINER_STACK_SIZE,
 							  CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID |
 								  CLONE_NEWUTS | SIGCHLD,
-							  &uds[1]);
+							  &slave_fd);
 
 	printc(INFO, "worker - createContainer", "clone successful\n");
 
@@ -787,11 +799,13 @@ void createContainer(struct TaskDetail *t) {
 		// the container was not created
 		printc(ERR, "worker - createContainer",
 			   "Could not create the container\n");
+		close(slave_fd);
+		close(master_fd);
 		perror("clone");
 		return;
 	}
 
-	close(uds[1]);
+	close(slave_fd);
 
 	// now write uid_map, gid_map and deny path
 	char map_buf[64];
@@ -803,10 +817,10 @@ void createContainer(struct TaskDetail *t) {
 	snprintf(map_buf, sizeof(map_buf), "0 %d 1", gid);
 	writeToPath(map_buf, container_pid, "gid_map");
 
-	t->bottom_fd = uds[0];
-	t->bottom_sd->fd = uds[0];
+	t->bottom_fd = master_fd;
+	t->bottom_sd->fd = master_fd;
 	setNonBlocking(t->bottom_fd);
-	addFDToEpoll(uds[0], EPOLL_OUT | EPOLLIN | EPOLL_DESTROY, t->bottom_sd);
+	addFDToEpoll(master_fd, EPOLL_OUT | EPOLLIN | EPOLL_DESTROY, t->bottom_sd);
 
 	printc(INFO, "worker - createContainer", "Container created\n");
 }

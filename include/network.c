@@ -21,7 +21,7 @@
 int sendFull(int __fd, const void *__buf, size_t __n, int __flags) {
 	ssize_t sent = 0;
 	int tries = 0;
-	while (sent < __n) {
+	while (sent < (ssize_t)__n) {
 		if (tries > MAX_TRIES) {
 			return EXIT_FAILURE;
 		}
@@ -39,12 +39,29 @@ int sendFull(int __fd, const void *__buf, size_t __n, int __flags) {
 int recvFull(int __fd, const void *__buf, size_t __n, int __flags) {
 	ssize_t recved = 0;
 	int tries = 0;
-	while (recved < __n) {
+	while (recved < (ssize_t)__n) {
 		if (tries > MAX_TRIES) {
 			return EXIT_FAILURE;
 		}
 		ssize_t r =
 			recv(__fd, (uint8_t *)__buf + recved, __n - recved, __flags);
+		if (r > 0) {
+			recved += r;
+			continue;
+		}
+		tries += 1;
+	}
+	return EXIT_SUCCESS;
+}
+
+int readFull(int __fd, const void *__buf, size_t __n) {
+	ssize_t recved = 0;
+	int tries = 0;
+	while (recved < (ssize_t)__n) {
+		if (tries > MAX_TRIES) {
+			return EXIT_FAILURE;
+		}
+		ssize_t r = read(__fd, (uint8_t *)__buf + recved, __n - recved);
 		if (r > 0) {
 			recved += r;
 			continue;

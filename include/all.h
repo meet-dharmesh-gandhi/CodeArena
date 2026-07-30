@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/epoll.h>
+#include <sys/ioctl.h>
 #include <sys/timerfd.h>
 #include <sys/wait.h>
 #include <time.h>
