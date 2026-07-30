@@ -1,5 +1,5 @@
 sudo docker compose up --build --scale empty=4 -d \
-&& sleep 60 \
+&& read -rsn 1 ans \
 && sudo docker compose logs empty > logs.txt \
 ; sudo docker compose down \
 && grep "^empty-1" logs.txt > logs-1.txt \

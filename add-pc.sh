@@ -1,1 +1,1 @@
-ssh-copy-id Lab208@10.20.16.103
+ssh-copy-id Lab205@10.20.16.78

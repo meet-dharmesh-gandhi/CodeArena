@@ -37,8 +37,9 @@ void startLoop(int max_events, int nfds, ...) {
 		ev.data.ptr = sd;
 		if (epoll_ctl(epollfd, EPOLL_CTL_ADD, sd->fd, &ev) != 0) {
 			printc(RED, "startLoop",
-				   "Failed to add fd %d to interest list, errno: %s\n", i,
-				   strerror(errno));
+				   "Failed to add fd number %d (fd %d) to interest list, "
+				   "errno: %s\n",
+				   i, sd->fd, strerror(errno));
 			perror("epoll");
 			return;
 		}
@@ -148,16 +149,28 @@ void readTimerFD(int timerfd) {
  * Returns UNKNOWN if the socket throws some error
  */
 int getPacketType(int fd, uint8_t *fd_buf, int *fd_buf_ptr) {
+	printc(INFO, "getPacketType", "req: %d\n", (int)(sizeof(int) * 2));
+	printc(INFO, "getPacketType", "fd_buf_ptr: %d\n", *fd_buf_ptr);
 	if (*fd_buf_ptr < (int)(sizeof(int) * 2)) {
-		int required = (sizeof(int) * 2) - *fd_buf_ptr;
-		int recved = recv(fd, *fd_buf_ptr + fd_buf, required, 0);
+		printc(INFO, "getPacketType", "Cond 1\n");
+		int required = (sizeof(int) * 2) - max(0, *fd_buf_ptr);
+		printc(INFO, "getPacketType", "required: %d\n", required);
+		int recved = recv(fd, fd_buf + *fd_buf_ptr, required, 0);
+		printc(INFO, "getPacketType", "recved: %d, required: %d\n", recved,
+			   required);
 
 		if (recved == required) {
 			// great, type received
+			printc(INFO, "getPacketType", "fd_buf: %b\n", fd_buf);
+			int packet_id;
+			memcpy(&packet_id, fd_buf, sizeof(int));
+			printc(INFO, "getPacketType", "packet_id: %d\n",
+				   packet_id == PACKET_ID);
 			int packet_type;
 			memcpy(&packet_type, sizeof(int) + fd_buf, sizeof(int));
-			*fd_buf_ptr = 0;
-			return packet_type;
+			printc(INFO, "getPacketType", "packet type: %d\n", packet_type);
+			*fd_buf_ptr = (int)(sizeof(int) * 2);
+			return ntohl(packet_type);
 		}
 
 		if (recved == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
@@ -168,9 +181,12 @@ int getPacketType(int fd, uint8_t *fd_buf, int *fd_buf_ptr) {
 
 		return NO;
 	} else {
+		printc(INFO, "getPacketType", "Cond 2\n");
 		int packet_type;
 		memcpy(&packet_type, sizeof(int) + fd_buf, sizeof(int));
-		return packet_type;
+		printc(INFO, "getPacketType", "packet type already exists: %d\n",
+			   packet_type);
+		return ntohl(packet_type);
 	}
 }
 
@@ -212,17 +228,24 @@ int getPacketData(int fd, uint8_t *fd_buf, int *fd_buf_ptr, uint8_t *packet,
 int getIOPacketData(int fd, uint8_t *fd_buf, int *fd_buf_ptr,
 					struct io_packet *packet, int *filled) {
 	if (*fd_buf_ptr < (int)(2 * sizeof(int))) {
+		printc(ERR, "getIOPacketData",
+			   "bad ptr - less than 2 times sizeof int\n", *fd_buf_ptr);
 		return UNKNOWN;
 	}
 
 	// data_size is the 6th property in io packet
 	int first_half = 6 * sizeof(int);
 	if (*fd_buf_ptr < first_half) {
+		printc(INFO, "getIOPacketData", "first half\n");
 		int recved =
 			recv(fd, fd_buf + *fd_buf_ptr, first_half - *fd_buf_ptr, 0);
+		printc(INFO, "getIOPacketData", "recved: %d\n", recved);
 		if (recved == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+			printc(INFO, "getIOPacketData", "socket drained\n");
 			return ERROR;
 		} else if (recved == -1) {
+			printc(ERR, "getIOPacketData", "some error: %d - %s\n", errno,
+				   strerror(errno));
 			return UNKNOWN;
 		}
 		*fd_buf_ptr += recved;
@@ -230,93 +253,34 @@ int getIOPacketData(int fd, uint8_t *fd_buf, int *fd_buf_ptr,
 			return NO;
 		}
 		memcpy(filled, fd_buf + (5 * sizeof(int)), sizeof(int));
+		printc(INFO, "getIOPacketData", "dataSize: %d\n", *filled);
 		*filled += first_half;
+		printc(INFO, "getIOPacketData", "packet size: %d\n", *filled);
 	}
 
+	printc(INFO, "getIOPacketData", "second half\n");
 	int required = *filled - *fd_buf_ptr;
 	int recved = recv(fd, fd_buf + *fd_buf_ptr, required, 0);
+	printc(INFO, "getIOPacketData", "receved: %d, required: %d\n", recved,
+		   required);
 
 	if (recved == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+		printc(INFO, "getIOPacketData", "socket drained\n");
 		return ERROR;
 	} else if (recved == -1) {
+		printc(ERR, "getIOPacketData", "some error: %d - %s\n", errno,
+			   strerror(errno));
 		return UNKNOWN;
 	}
 
 	if (recved < required) {
+		printc(INFO, "getIOPacketData", "recved != required\n");
 		fd_buf_ptr += max(recved, 0);
 		return NO;
 	}
 
+	printc(INFO, "getIOPacketData", "Got packet\n");
 	memcpy(packet, fd_buf, *filled);
 	*fd_buf_ptr = 0;
 	return YES;
 }
-
-// int sendPacket(uint8_t *packet_buf, int *packet_buf_ptr, int packet_size) {}
-
-// /**
-//  * This function is called when a socket triggers EPOLLIN
-//  * Returns UNKNOWN if the buffer is already full
-//  * Returns YES if the whole message is sent
-//  * Returns NO if the message is still in buffer
-//  *
-//  * Note: The buffer size and packet size must be same
-//  * or the data will be in an inconsistent state
-//  */
-// int sendData(struct socketDetails *src_sd, struct socketDetails *dest_sd,
-// 			 uint8_t *packet, int packet_size, uint8_t *buf, int buf_ptr) {
-// 	// since data is being sent there are two assumptions
-// 	// packet_size is the buffer size
-// 	// buf_ptr will be 0
-// 	if (buf_ptr > 0) {
-// 		return UNKNOWN;
-// 	}
-
-// 	// keep sending until EAGAIN is hit
-// 	while (1) {
-// 		// now copy packet onto buf
-// 		memcpy(buf, packet, packet_size);
-
-// 		// now try to send the packet
-// 		int sent = send(dest_sd->fd, packet, packet_size, 0);
-
-// 		// if all data is sent, % will bring buf_ptr to 0
-// 		buf_ptr = (buf_ptr + sent) % packet_size;
-
-// 		if (buf_ptr != 0) {
-// 			// remove EPOLLIN events from this socket
-// 			modifyFDInEpoll(src_sd->fd, EPOLLET | EPOLL_DESTROY, src_sd);
-
-// 			// add EPOLLOUT to this socket
-// 			modifyFDInEpoll(dest_sd->fd, EPOLLOUT | EPOLL_DESTROY, dest_sd);
-
-// 			return NO;
-// 		}
-// 	}
-
-// 	return YES;
-// }
-
-// /**
-//  * This function is called when a socket triggers EPOLLOUT
-//  */
-// int putData(struct socketDetails *src_sd, struct socketDetails *dest_sd,
-// 			uint8_t *packet, int packet_size, uint8_t *buf, int buf_size,
-// 			int buf_ptr) {
-// 	// since the data is being put there are two assumptions
-// 	// the buf_ptr should not be 0
-// 	if (buf_ptr <= 0) {
-// 		return UNKNOWN;
-// 	}
-
-// 	// first let's try sending data into the fd
-// 	int remaining = buf_size - buf_ptr;
-// 	int sent = send(src_sd->fd, buf, remaining, 0);
-
-// 	if (sent < remaining) {
-// 		// buffer not empty
-// 		return NO;
-// 	}
-
-// 	// buffer empty, now start pulling data from src socket
-// }

@@ -18,6 +18,8 @@ const int expectedConnectionsListSize =
 int discover_fd, find_fd, hb_fd, role_fd, monitor_fd, timer_fd;
 int hb_cnt;
 
+int uds[2];
+
 uint8_t *fd_buf;
 const int fdBufSize = sizeof(uint8_t) * LARGEST_PACKET;
 
@@ -45,7 +47,7 @@ struct find_monitor_packet *fmp;
 const int fmp_size = sizeof(struct find_monitor_packet);
 
 struct socketDetails *discover_fd_sd, *find_fd_sd, *hb_fd_sd, *role_fd_sd,
-	*timer_fd_sd;
+	*timer_fd_sd, *exit_fd_sd;
 
 void cleanUpNodes();
 void sendRolePackets();
@@ -75,6 +77,8 @@ int getAnyMonitor();
 int getGlobalMinLoadedAssigner();
 int getLocalMinLoadedAssigner();
 int validPacket();
+void handle_sigterm(int signum);
+void handle_exit_fd(struct socketDetails *sd);
 
 void handle_discover_fd(struct socketDetails *sd);
 void handle_timer_fd(struct socketDetails *sd);
@@ -103,6 +107,16 @@ int main(int argc, char const *argv[]) {
 
 	fd_buf = amalloc(&arena, fdBufSize);
 
+	struct sigaction sa;
+	sa.sa_handler = handle_sigterm;
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = 0;
+
+	if (sigaction(SIGTERM, &sa, NULL) == -1) {
+		perror("Error setting up SIGTERM handler");
+		return EXIT_FAILURE;
+	}
+
 	addr = amalloc(&arena, addrLen);
 	emptyAddr = amalloc(&arena, addrLen);
 	broadcastAddr = amalloc(&arena, addrLen);
@@ -123,6 +137,14 @@ int main(int argc, char const *argv[]) {
 
 	timer_fd = getNewTimerFD(CLOCK_MONOTONIC, HEARTBEAT_INTERVAL,
 							 HEARTBEAT_INTERVAL, 1);
+
+	// create uds
+	if (socketpair(AF_UNIX, SOCK_STREAM, 0, uds) == -1) {
+		// uds was not created
+		printc(ERR, "empty", "Could not create UDS\n");
+		perror("UDS");
+		return 1;
+	}
 
 	hb_cnt = 0;
 
@@ -170,16 +192,37 @@ int main(int argc, char const *argv[]) {
 	timer_fd_sd->data = NULL;
 	timer_fd_sd->events = 0;
 
+	exit_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
+	exit_fd_sd->fd = uds[0];
+	exit_fd_sd->handler = &handle_exit_fd;
+	exit_fd_sd->data = NULL;
+	exit_fd_sd->events = 0;
+
 	printc(INFO, "monitor", "Event loop starting\n");
 
-	startLoop(MAX_EVENTS, 5, discover_fd_sd, find_fd_sd, hb_fd_sd, role_fd_sd,
-			  timer_fd_sd);
+	startLoop(MAX_EVENTS, 6, discover_fd_sd, find_fd_sd, hb_fd_sd, role_fd_sd,
+			  timer_fd_sd, exit_fd_sd);
 
 	printc(INFO, "monitor", "Event loop ending\n");
 
 	freeArena(&arena);
 
 	return 0;
+}
+
+void handle_sigterm(int signum) {
+	(void)signum;
+	int yes = 1;
+	write(uds[1], &yes, sizeof(int));
+}
+
+void handle_exit_fd(struct socketDetails *sd) {
+	close(discover_fd);
+	close(find_fd);
+	close(hb_fd);
+	close(role_fd);
+	close(timer_fd);
+	freeArena(&arena);
 }
 
 void handle_discover_fd(struct socketDetails *sd) {
@@ -252,6 +295,10 @@ void handle_role_fd(struct socketDetails *sd) {
 				printc(IMP, "monitor - handle_role_fd",
 					   "Got a promote packet: %d, become: %d\n",
 					   pp->promoted_node_type, pp->target_node_type);
+				if (pp->target_node_type == MONITOR_NODE) {
+					printc(RED, "monitor - handle_role_fd", "Not promoting\n");
+					return;
+				}
 				int ind = getNode(pp->promoted_node_type);
 				if (ind != -1) {
 					printc(INFO, "monitor - handle_role_fd", "Found node: %s\n",
@@ -282,7 +329,8 @@ void handle_role_fd(struct socketDetails *sd) {
 							nodeList[i].filled = 0;
 						}
 					}
-				} else if (dp->demoted_node_type == MONITOR_NODE) {
+				} else if (dp->demoted_node_type == MONITOR_NODE &&
+						   haveHighestUID() == NO) {
 					morph(EMPTY_NODE, 0);
 				}
 			}
@@ -440,14 +488,17 @@ void sendRolePackets() {
 
 	// for promotion
 	int promotionExpectedAssigners =
-		divideCeil(tasks, PROMOTE_ASSIGNER_THRESHOLD);
-	int promotionExpectedWorkers = divideCeil(tasks, PROMOTE_WORKER_THRESHOLD);
+		max(1, divideCeil(tasks, PROMOTE_ASSIGNER_THRESHOLD));
+	int promotionExpectedWorkers =
+		max(1, divideCeil(tasks, PROMOTE_WORKER_THRESHOLD));
 
 	// for demotion
-	int demotionExpectedMonitors = divideCeil(tasks, DEMOTE_MONITOR_THRESHOLD);
+	int demotionExpectedMonitors =
+		max(1, divideCeil(tasks, DEMOTE_MONITOR_THRESHOLD));
 	int demotionExpectedAssigners =
-		divideCeil(tasks, DEMOTE_ASSIGNER_THRESHOLD);
-	int demotionExpectedWorkers = divideCeil(tasks, DEMOTE_WORKER_THRESHOLD);
+		max(1, divideCeil(tasks, DEMOTE_ASSIGNER_THRESHOLD));
+	int demotionExpectedWorkers =
+		max(1, divideCeil(tasks, DEMOTE_WORKER_THRESHOLD));
 
 	printc(INFO, "monitor - sendRolePackets",
 		   "assigners: %d, workers: %d, empty: %d, monitors: %d, gateways: %d, "

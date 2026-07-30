@@ -181,12 +181,6 @@ napi_value Start(napi_env env, napi_value exports) {
 	timer_fd = getNewTimerFD(CLOCK_MONOTONIC, HEARTBEAT_INTERVAL,
 							 HEARTBEAT_INTERVAL, 1);
 
-	setNonBlocking(discover_fd);
-	setNonBlocking(find_fd);
-	setNonBlocking(task_fd);
-	setNonBlocking(hb_fd);
-	setNonBlocking(accept_assigner_fd);
-
 	fnp = malloc(fnp_size);
 	fonp = malloc(fonp_size);
 	tp = malloc(tp_size);
@@ -373,7 +367,8 @@ void handle_accept_assigner_fd(uv_poll_t *handle, int status, int events) {
 		// check if this was expected
 		int expected = 0;
 		for (int i = 0; i < expectedConnectionsListLength; i++) {
-			if (memcmp(&expectedConnectionsList[i].addr, addr, addrLen) == 0) {
+			if (memcmp(&expectedConnectionsList[i].addr.sin_addr.s_addr,
+					   &addr->sin_addr.s_addr, sizeof(in_addr_t)) == 0) {
 				expected = 1;
 				break;
 			}
@@ -383,8 +378,11 @@ void handle_accept_assigner_fd(uv_poll_t *handle, int status, int events) {
 			continue;
 		}
 
+		printc(INFO, "gateway - handle_accept_assigner_fd", "Assigner: %s\n",
+			   getPrintableIP(addr));
+
 		removeFromExpectedConnectionsList(addr);
-		removeFromRetryList(find_fd, FIND_NODE_PACKET, fnp_size);
+		removeFromRetryList(task_fd, TASK_PACKET, tp_size);
 
 		struct Task *t = setTaskFD(res);
 
@@ -727,19 +725,31 @@ napi_value OnMessage(napi_env env, napi_callback_info info) {
 	}
 
 	while (1) {
+		memset(iop, 0, iop_size);
 		iop->packet_ID = PACKET_ID;
-		iop->packet_type = IO_PACKET;
+		iop->packet_type = htonl(IO_PACKET);
+		printc(INFO, "gateway - OnMessage", "packet_type: %d\n",
+			   iop->packet_type);
 		iop->node_type = GATEWAY_NODE;
 		iop->UID = UID;
 		iop->task_ID = taskID;
 		int dataSize =
 			min(MAX_DATA_CAPACITY, t->client_buf_size - t->client_buf_ptr);
+		if (dataSize == 0) {
+			break;
+		}
+		iop->data_size = dataSize;
+
 		int packetSize = iop_size - MAX_DATA_CAPACITY + dataSize;
-		memcpy(&iop->data, t->client_buf + t->client_buf_ptr, dataSize);
+		memcpy(iop->data, t->client_buf + t->client_buf_ptr, dataSize);
 		t->client_buf_ptr += dataSize;
 		int sent = send(t->assigner_fd, iop, packetSize, 0);
+		printc(INFO, "gateway - OnMessage",
+			   "Message sent: %d, dataSize: %d, packetSize: %d\n", sent,
+			   dataSize, packetSize);
 
 		if (sent == -1 && (errno == EWOULDBLOCK || errno == EAGAIN)) {
+			printc(RED, "gateway - OnMessage", "Assigner socket full\n");
 			break;
 		} else if (sent == -1) {
 			printc(RED, "gateway - OnMessage",
@@ -749,6 +759,7 @@ napi_value OnMessage(napi_env env, napi_callback_info info) {
 		}
 
 		if (sent < packetSize) {
+			printc(INFO, "gateway - OnMessage", "Adding to buffer\n");
 			t->assigner_buf_ptr = max(sent, 0);
 			memcpy(&t->assigner_buf, iop, packetSize);
 
@@ -874,12 +885,17 @@ struct Task *addTask(napi_env env, napi_value cb, napi_value close_cb,
 			napi_status status;
 			taskList[i].filled = 1;
 			taskList[i].taskID = i;
+			taskList[i].assigner_fd = -1;
 			taskList[i].created_at = getCurrTime();
 			taskList[i].active = 1;
 			memset(taskList[i].assigner_buf, 0, MAX_DATA_CAPACITY);
 			taskList[i].assigner_buf_ptr = 0;
-			taskList[i].assigner_fd = -1;
-			taskList[i].env = env;
+			taskList[i].assigner_buf_filled = 0;
+			taskList[i].client_buf = NULL;
+			taskList[i].client_buf_ptr = 0;
+			taskList[i].client_buf_size = 0;
+			memset(&taskList[i].poll_handle, 0, sizeof(uv_poll_t));
+			taskList[i].poll_handle.data = &taskList[i];
 			status = napi_create_reference(env, cb, 1, &taskList[i].cb);
 			if (status != napi_ok) {
 				taskList[i].filled = 0;
@@ -900,6 +916,7 @@ struct Task *addTask(napi_env env, napi_value cb, napi_value close_cb,
 				printNapiError(env, "Gatway - addTask - message_cb");
 				return NULL;
 			}
+			taskList[i].env = env;
 			return &taskList[i];
 		}
 	}
@@ -965,6 +982,10 @@ void removeDeadTasks() {
 void retryPackets() {
 	for (int i = 0; i < retryPacketListLength; i++) {
 		if (retryPacketList[i].filled == 1) {
+			printc(INFO, "gateway - retryPackets",
+				   "addr: %s, packet type: %d\n",
+				   getPrintableIP(&retryPacketList[i].addr),
+				   retryPacketList[i].packet_type);
 			sendto(retryPacketList[i].fd, &retryPacketList[i].packet,
 				   retryPacketList[i].packet_size, 0, &retryPacketList[i].addr,
 				   addrLen);
@@ -1077,8 +1098,8 @@ void removeFromExpectedConnectionsList(struct sockaddr_in *given_addr) {
 
 	for (int i = 0; i < expectedConnectionsListLength; i++) {
 		if (expectedConnectionsList[i].filled == 1 &&
-			memcmp(&expectedConnectionsList[i].addr, given_addr, addrLen) ==
-				0) {
+			memcmp(&expectedConnectionsList[i].addr.sin_addr.s_addr,
+				   &given_addr->sin_addr.s_addr, sizeof(in_addr_t)) == 0) {
 			expectedConnectionsList[i].filled = 0;
 		}
 	}

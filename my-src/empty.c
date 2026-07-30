@@ -29,14 +29,18 @@ const int hp_size = sizeof(struct heartbeat_packet);
 struct find_monitor_packet *fmp;
 const int fmp_size = sizeof(struct find_monitor_packet);
 
-struct socketDetails *role_timer_fd_sd, *role_fd_sd, *hb_fd_sd, *timer_fd_sd;
+struct socketDetails *role_timer_fd_sd, *role_fd_sd, *hb_fd_sd, *timer_fd_sd,
+	*exit_fd_sd;
 int role_timer_on;
 int jitter;
+int uds[2];
 
 void handle_role_timer_fd(struct socketDetails *sd);
 void handle_timer_fd(struct socketDetails *sd);
 void handle_hb_fd(struct socketDetails *sd);
 void handle_role_fd(struct socketDetails *sd);
+void handle_exit_fd(struct socketDetails *sd);
+void handle_sigterm(int signum);
 void sendHeartbeat();
 void sendDiscoveryPacket();
 int validPacket();
@@ -56,6 +60,16 @@ int main(int argc, char const *argv[]) {
 	arena = createArena(ARENA_SIZE);
 
 	fd_buf = amalloc(&arena, fdBuf_size);
+
+	struct sigaction sa;
+	sa.sa_handler = handle_sigterm;
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = 0;
+
+	if (sigaction(SIGTERM, &sa, NULL) == -1) {
+		perror("Error setting up SIGTERM handler");
+		return EXIT_FAILURE;
+	}
 
 	monitorLastShouted = amalloc(&arena, monitorLastShoutedLength);
 	memset(monitorLastShouted, 0, monitorLastShoutedLength);
@@ -85,6 +99,14 @@ int main(int argc, char const *argv[]) {
 	// generates a jitter between 1000ms and 50ms
 	jitter = getJitter(1000, 50);
 	role_timer_fd = getNewTimerFD(CLOCK_MONOTONIC, 0, 0, 1);
+
+	// create uds
+	if (socketpair(AF_UNIX, SOCK_STREAM, 0, uds) == -1) {
+		// uds was not created
+		printc(ERR, "empty", "Could not create UDS\n");
+		perror("UDS");
+		return 1;
+	}
 
 	drainSocket(role_fd, SOCK_DGRAM);
 	drainSocket(hb_fd, SOCK_DGRAM);
@@ -119,15 +141,41 @@ int main(int argc, char const *argv[]) {
 	timer_fd_sd->data = NULL;
 	timer_fd_sd->events = 0;
 
+	exit_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
+	exit_fd_sd->fd = uds[0];
+	exit_fd_sd->handler = &handle_exit_fd;
+	exit_fd_sd->data = NULL;
+	exit_fd_sd->events = 0;
+
 	printc(INFO, "empty", "Event loop started\n");
 
-	startLoop(MAX_EVENTS, 3, role_fd_sd, hb_fd_sd, timer_fd_sd);
+	startLoop(MAX_EVENTS, 4, role_fd_sd, hb_fd_sd, timer_fd_sd, exit_fd_sd);
 
 	printc(INFO, "empty", "Event loop ended\n");
 
+	close(discover_fd);
+	close(role_fd);
+	close(hb_fd);
+	close(timer_fd);
+	close(role_timer_fd);
 	freeArena(&arena);
 
 	return 0;
+}
+
+void handle_sigterm(int signum) {
+	(void)signum;
+	int yes = 1;
+	write(uds[1], &yes, sizeof(int));
+}
+
+void handle_exit_fd(struct socketDetails *sd) {
+	close(discover_fd);
+	close(role_fd);
+	close(hb_fd);
+	close(timer_fd);
+	close(role_timer_fd);
+	freeArena(&arena);
 }
 
 void handle_role_timer_fd(struct socketDetails *sd) {

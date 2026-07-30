@@ -33,8 +33,10 @@ int roleChanged = 0;
 int task_fd, find_fd, hb_fd, role_fd, discover_fd, gateway_fd, timer_fd,
 	accept_worker_fd;
 
+int uds[2];
+
 struct socketDetails *task_fd_sd, *find_fd_sd, *hb_fd_sd, *role_fd_sd,
-	*gateway_fd_sd, *timer_fd_sd, *accept_worker_fd_sd;
+	*gateway_fd_sd, *timer_fd_sd, *accept_worker_fd_sd, *exit_fd_sd;
 
 uint8_t *fd_buf;
 const int fdBufSize = sizeof(uint8_t) * LARGEST_PACKET;
@@ -91,6 +93,8 @@ int tcpConnectionExists(int fd);
 int requestTCPConnection(int fd, struct sockaddr_in *given_addr, void *data);
 int isFull();
 int validPacket();
+void handle_sigterm(int signum);
+void handle_exit_fd(struct socketDetails *sd);
 
 void handle_role_fd(struct socketDetails *sd);
 void handle_timer_fd(struct socketDetails *sd);
@@ -126,6 +130,18 @@ int main(int argc, char const *argv[]) {
 	expectedConnectionsList = amalloc(&arena, expectedConnectionsListSize);
 	memset(expectedConnectionsList, 0, expectedConnectionsListSize);
 
+	fd_buf = amalloc(&arena, fdBufSize);
+
+	struct sigaction sa;
+	sa.sa_handler = handle_sigterm;
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = 0;
+
+	if (sigaction(SIGTERM, &sa, NULL) == -1) {
+		perror("Error setting up SIGTERM handler");
+		return EXIT_FAILURE;
+	}
+
 	monitorAddr = amalloc(&arena, addrLen);
 	emptyAddr = amalloc(&arena, addrLen);
 	broadcastAddr = amalloc(&arena, addrLen);
@@ -148,9 +164,17 @@ int main(int argc, char const *argv[]) {
 	role_fd = getNewSocket(ROLE_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
 	discover_fd = getNewSocket(DISCOVER_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
 
-	gateway_fd =
-		getNewSocket(ASSIGNER_GATEWAY_TASK_PORT, SOCKET_TIMEOUT, SOCK_STREAM);
+	gateway_fd = socket(AF_INET, SOCK_STREAM, 0);
+	// getNewSocket(ASSIGNER_GATEWAY_TASK_PORT, SOCKET_TIMEOUT, SOCK_STREAM);
 	accept_worker_fd = getNewSocket(TASK_PORT, SOCKET_TIMEOUT, SOCK_STREAM);
+
+	// create uds
+	if (socketpair(AF_UNIX, SOCK_STREAM, 0, uds) == -1) {
+		// uds was not created
+		printc(ERR, "empty", "Could not create UDS\n");
+		perror("UDS");
+		return 1;
+	}
 
 	printc(RED, "assigner", "accept_worker_fd: %d\n", accept_worker_fd);
 
@@ -161,8 +185,6 @@ int main(int argc, char const *argv[]) {
 	drainSocket(find_fd, SOCK_DGRAM);
 	drainSocket(hb_fd, SOCK_DGRAM);
 	drainSocket(role_fd, SOCK_DGRAM);
-
-	fd_buf = amalloc(&arena, fdBufSize);
 
 	gp = amalloc(&arena, gp_size);
 	tp = amalloc(&arena, tp_size);
@@ -218,16 +240,40 @@ int main(int argc, char const *argv[]) {
 	timer_fd_sd->data = NULL;
 	timer_fd_sd->events = 0;
 
+	exit_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
+	exit_fd_sd->fd = uds[0];
+	exit_fd_sd->handler = &handle_exit_fd;
+	exit_fd_sd->data = NULL;
+	exit_fd_sd->events = 0;
+
 	printc(INFO, "assigner - main", "starting event loop\n");
 
 	startLoop(MAX_EVENTS, 7, task_fd_sd, find_fd_sd, hb_fd_sd, role_fd_sd,
-			  gateway_fd_sd, accept_worker_fd_sd, timer_fd_sd);
+			  accept_worker_fd_sd, timer_fd_sd, exit_fd_sd);
 
 	printc(INFO, "assigner - main", "stopping event loop\n");
 
 	freeArena(&arena);
 
 	return 0;
+}
+
+void handle_sigterm(int signum) {
+	(void)signum;
+	int yes = 1;
+	write(uds[1], &yes, sizeof(int));
+}
+
+void handle_exit_fd(struct socketDetails *sd) {
+	close(task_fd);
+	close(find_fd);
+	close(hb_fd);
+	close(role_fd);
+	close(discover_fd);
+	close(gateway_fd);
+	close(accept_worker_fd);
+	close(timer_fd);
+	freeArena(&arena);
 }
 
 void handle_role_fd(struct socketDetails *sd) {
@@ -298,8 +344,9 @@ void handle_accept_worker_fd(struct socketDetails *sd) {
 				int expected = 0;
 				for (int i = 0; i < expectedConnectionsListLength; i++) {
 					if (expectedConnectionsList[i].filled == 1 &&
-						memcmp(&expectedConnectionsList[i].addr, addr,
-							   addrLen) == 0) {
+						memcmp(&expectedConnectionsList[i].addr.sin_addr.s_addr,
+							   &addr->sin_addr.s_addr,
+							   sizeof(in_addr_t)) == 0) {
 						printc(INFO, "assigner - accept_worker_fd",
 							   "new worker recved, ip: %s\n",
 							   getPrintableIP(addr));
@@ -308,9 +355,11 @@ void handle_accept_worker_fd(struct socketDetails *sd) {
 							if (taskList[i].filled == 1 &&
 								taskList[i].bottom_fd == -1) {
 								taskList[i].bottom_fd = res;
+								taskList[i].bottom_sd->data = getNodeIB(res);
 							}
 						}
 						expectedConnectionsList[i].filled = 0;
+						removeFromRetryList(task_fd, addr, TASK_PACKET);
 						expected = 1;
 						break;
 					}
@@ -349,101 +398,111 @@ void handle_hb_fd(struct socketDetails *sd) {
 void handle_gateway_fd(struct socketDetails *sd) {
 	int events = sd->events;
 	struct IntermediateBuffer *ib = (struct IntermediateBuffer *)sd->data;
+	printc(INFO, "assigner - handle_gateway_fd", "ib is NULL? %d\n",
+		   ib == NULL ? 1 : 0);
 
+	printc(INFO, "assigner - handle_gateway_fd", "events: %d\n", events);
 	if (events & EPOLLOUT) {
+		printc(INFO, "assigner - handle_gateway_fd",
+			   "Gateway fd ready - EPOLLOUT\n");
+		int hasStarted = 1;
 		for (int i = 0; i < taskListLength; i++) {
-			if (taskList[i].filled == 1) {
-				if (taskList[i].bottom_buf_ptr != -1) {
-					printc(INFO, "assigner - handle_gateway_fd",
-						   "Sending data of task %d to gateway\n", i);
+			if (taskList[i].filled == 1 && taskList[i].bottom_buf_ptr != -1) {
+				hasStarted = 0;
 
-					struct TaskDetail *t = &taskList[i];
-					int required = t->bottom_filled - t->bottom_buf_ptr;
-					int sent = send(sd->fd, t->bottom_buf + t->bottom_buf_ptr,
-									required, 0);
+				printc(INFO, "assigner - handle_gateway_fd",
+					   "Sending data of task %d to gateway\n", i);
 
-					if (sent < required) {
-						t->bottom_buf_ptr += max(sent, 0);
-						return;
-					}
+				struct TaskDetail *t = &taskList[i];
+				int required = t->bottom_filled - t->bottom_buf_ptr;
+				int sent = send(sd->fd, t->bottom_buf + t->bottom_buf_ptr,
+								required, 0);
 
-					t->bottom_buf_ptr = 0;
+				if (sent < required) {
+					t->bottom_buf_ptr += max(sent, 0);
+					return;
+				}
 
-					struct IntermediateBuffer *wIb = getNodeIB(t->bottom_fd);
-					// perform the tasks a worker would perform
-					while (1) {
-						int packet_type =
-							getPacketType(sd->fd, wIb->buf, &wIb->buf_ptr);
+				t->bottom_buf_ptr = 0;
 
-						if (packet_type == IO_PACKET) {
-							// copy to iop
-							int done =
-								getIOPacketData(sd->fd, wIb->buf, &wIb->buf_ptr,
-												iop, &wIb->filled);
+				struct IntermediateBuffer *wIb = getNodeIB(t->bottom_fd);
+				// perform the tasks a worker would perform
+				while (1) {
+					int packet_type =
+						getPacketType(sd->fd, wIb->buf, &wIb->buf_ptr);
 
-							if (done == YES) {
-								printc(INFO, "assigner - handle_worker_fd",
-									   "Got IO packet, task: %d\n",
-									   iop->task_ID);
-								// now forward this data to the gateway
-								int sent =
-									send(gateway_fd, iop, wIb->filled, 0);
+					if (packet_type == IO_PACKET) {
+						// copy to iop
+						int done = getIOPacketData(
+							sd->fd, wIb->buf, &wIb->buf_ptr, iop, &wIb->filled);
 
-								if (sent < wIb->filled) {
-									struct TaskDetail *t =
-										&taskList[iop->task_ID];
-									// copy to bottom_buf
-									memcpy(t->bottom_buf, iop, wIb->filled);
-									t->bottom_buf_ptr = max(sent, 0);
-									t->bottom_filled = wIb->filled;
+						if (done == YES) {
+							printc(INFO, "assigner - handle_worker_fd",
+								   "Got IO packet, task: %d\n", iop->task_ID);
+							// now forward this data to the gateway
+							int sent = send(gateway_fd, iop, wIb->filled, 0);
 
-									return;
-								}
-							} else if (done == ERROR || done == UNKNOWN) {
-								break;
+							if (sent < wIb->filled) {
+								struct TaskDetail *t = &taskList[iop->task_ID];
+								// copy to bottom_buf
+								memcpy(t->bottom_buf, iop, wIb->filled);
+								t->bottom_buf_ptr = max(sent, 0);
+								t->bottom_filled = wIb->filled;
+
+								return;
 							}
-						} else if (packet_type == TASK_OVER_PACKET) {
-							// copy to top
-							int done =
-								getPacketData(sd->fd, wIb->buf, &wIb->buf_ptr,
-											  (uint8_t *)top, top_size);
-
-							if (done == YES) {
-								close(sd->fd);
-								deleteFDInEpoll(sd->fd);
-								removeTask(top->taskID);
-								sendTaskOverPacket(taskList[top->taskID].top_fd,
-												   top->taskID);
-								wIb->taken = 0;
-							} else if (done == ERROR || done == UNKNOWN) {
-								break;
-							}
-						} else if (packet_type == CANCEL_TASK_PACKET) {
-							// copy to ctp
-							int done =
-								getPacketData(sd->fd, wIb->buf, &wIb->buf_ptr,
-											  (uint8_t *)ctp, ctp_size);
-
-							if (done == YES) {
-								close(sd->fd);
-								deleteFDInEpoll(sd->fd);
-								removeTask(ctp->taskID);
-								sendCancelTaskPacket(
-									taskList[ctp->taskID].top_fd, ctp->taskID);
-								wIb->taken = 0;
-							} else if (done == ERROR || done == UNKNOWN) {
-								break;
-							}
-						} else if (packet_type == ERROR) {
+						} else if (done == ERROR || done == UNKNOWN) {
 							break;
 						}
+					} else if (packet_type == TASK_OVER_PACKET) {
+						// copy to top
+						int done =
+							getPacketData(sd->fd, wIb->buf, &wIb->buf_ptr,
+										  (uint8_t *)top, top_size);
+
+						if (done == YES) {
+							close(sd->fd);
+							deleteFDInEpoll(sd->fd);
+							removeTask(top->taskID);
+							sendTaskOverPacket(taskList[top->taskID].top_fd,
+											   top->taskID);
+							wIb->taken = 0;
+						} else if (done == ERROR || done == UNKNOWN) {
+							break;
+						}
+					} else if (packet_type == CANCEL_TASK_PACKET) {
+						// copy to ctp
+						int done =
+							getPacketData(sd->fd, wIb->buf, &wIb->buf_ptr,
+										  (uint8_t *)ctp, ctp_size);
+
+						if (done == YES) {
+							close(sd->fd);
+							deleteFDInEpoll(sd->fd);
+							removeTask(ctp->taskID);
+							sendCancelTaskPacket(taskList[ctp->taskID].top_fd,
+												 ctp->taskID);
+							wIb->taken = 0;
+						} else if (done == ERROR || done == UNKNOWN) {
+							break;
+						}
+					} else if (packet_type == ERROR) {
+						t->bottom_buf_ptr = -1;
+						break;
 					}
 				}
 			}
 		}
 
-		modifyFDInEpoll(sd->fd, EPOLL_IN | EPOLLOUT | EPOLL_DESTROY, sd);
-	} else if (events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
+		if (hasStarted == 0) {
+			printc(INFO, "assigner - handle_gateway_fd",
+				   "fd modified, added EPOLLIN\n");
+			modifyFDInEpoll(sd->fd,
+							EPOLLET | EPOLLIN | EPOLLOUT | EPOLL_DESTROY, sd);
+		}
+	}
+
+	if (events & EPOLL_DESTROY) {
 		// connection dropped
 		// remove all tasks
 		printc(INFO, "assigner - handle_gateway_fd", "Gateway died\n");
@@ -452,15 +511,25 @@ void handle_gateway_fd(struct socketDetails *sd) {
 		}
 		ib->taken = 0;
 		ib->buf_ptr = 0;
-	} else if (events & EPOLLIN) {
+	}
+
+	if (events & EPOLLIN) {
 		// some input from the gateway, pass it to the worker
+		printc(INFO, "assigner - handle_gateway_fd",
+			   "EPOLLIN - gateway socket\n");
 		while (1) {
 			int packet_type = getPacketType(sd->fd, ib->buf, &ib->buf_ptr);
+			printc(INFO, "assigner - handle_gateway_fd",
+				   "packet_type: %d, is IO %d\n", packet_type,
+				   packet_type == IO_PACKET);
 
 			if (packet_type == IO_PACKET) {
 				// packet - iop
+				printc(INFO, "assigner - handle_gateway_fd", "Received IOP\n");
 				int done = getIOPacketData(sd->fd, ib->buf, &ib->buf_ptr, iop,
 										   &ib->filled);
+				printc(INFO, "assigner - handle_gateway_fd", "got data: %d\n",
+					   done);
 
 				if (done == YES) {
 					printc(INFO, "assigner - handle_gateway_fd",
@@ -476,6 +545,8 @@ void handle_gateway_fd(struct socketDetails *sd) {
 					int sent = send(t->bottom_fd, iop, ib->filled, 0);
 
 					if (sent < ib->filled) {
+						printc(INFO, "assigner - handle_gateway_fd",
+							   "Full data did not go through\n");
 						// copy iop into top_buf
 						memcpy(t->top_buf, iop, ib->filled);
 						t->top_buf_ptr = max(sent, 0);
@@ -527,93 +598,96 @@ void handle_worker_fd(struct socketDetails *sd) {
 	struct IntermediateBuffer *ib = (struct IntermediateBuffer *)sd->data;
 
 	if (events & EPOLLOUT) {
+		int changed = 0;
 		for (int i = 0; i < taskListLength; i++) {
-			if (taskList[i].filled == 1 && taskList[i].bottom_fd == sd->fd) {
-				if (ib->buf_ptr != -1) {
-					printc(INFO, "assigner - handle_worker_fd",
-						   "Data going from worker to gateway\n");
-					int required = ib->filled - ib->buf_ptr;
-					int sent =
-						send(gateway_fd, ib->buf + ib->buf_ptr, required, 0);
+			if (taskList[i].filled == 1 && taskList[i].bottom_fd == sd->fd &&
+				taskList[i].top_buf_ptr != -1) {
+				changed = 1;
+				printc(INFO, "assigner - handle_worker_fd",
+					   "Data going from worker to gateway\n");
+				int required = ib->filled - ib->buf_ptr;
+				int sent = send(gateway_fd, ib->buf + ib->buf_ptr, required, 0);
 
-					if (sent < required) {
-						ib->buf_ptr += max(sent, 0);
-						return;
-					}
+				if (sent < required) {
+					ib->buf_ptr += max(sent, 0);
+					return;
+				}
 
-					ib->buf_ptr = 0;
+				ib->buf_ptr = 0;
 
-					// some input from the gateway, pass it to the worker
-					struct IntermediateBuffer *gIb =
-						getNodeIB(taskList[i].top_fd);
-					struct TaskDetail *t = &taskList[i];
-					while (1) {
-						int packet_type =
-							getPacketType(sd->fd, gIb->buf, &gIb->buf_ptr);
+				// some input from the gateway, pass it to the worker
+				struct IntermediateBuffer *gIb = getNodeIB(taskList[i].top_fd);
+				struct TaskDetail *t = &taskList[i];
+				while (1) {
+					int packet_type =
+						getPacketType(sd->fd, gIb->buf, &gIb->buf_ptr);
 
-						if (packet_type == IO_PACKET) {
-							// packet - iop
-							int done =
-								getIOPacketData(sd->fd, gIb->buf, &gIb->buf_ptr,
-												iop, &gIb->filled);
+					if (packet_type == IO_PACKET) {
+						// packet - iop
+						int done = getIOPacketData(
+							sd->fd, gIb->buf, &gIb->buf_ptr, iop, &gIb->filled);
 
-							if (done == YES) {
-								printc(INFO, "assigner - handle_gateway_fd",
-									   "Got IO packet, task %d\n",
-									   iop->task_ID);
-								// packet is formed
+						if (done == YES) {
+							printc(INFO, "assigner - handle_gateway_fd",
+								   "Got IO packet, task %d\n", iop->task_ID);
+							// packet is formed
 
-								int sent =
-									send(t->bottom_fd, iop, gIb->filled, 0);
+							int sent = send(t->bottom_fd, iop, gIb->filled, 0);
 
-								if (sent < gIb->filled) {
-									// copy iop into top_buf
-									memcpy(t->top_buf, iop, gIb->filled);
-									t->top_buf_ptr = max(sent, 0);
-									t->top_filled = gIb->filled;
+							if (sent < gIb->filled) {
+								// copy iop into top_buf
+								memcpy(t->top_buf, iop, gIb->filled);
+								t->top_buf_ptr = max(sent, 0);
+								t->top_filled = gIb->filled;
 
-									return;
-								}
-							} else if (done == ERROR || done == UNKNOWN) {
-								break;
+								return;
+							} else {
+								t->top_buf_ptr = -1;
 							}
-						} else if (packet_type == TASK_OVER_PACKET) {
-							// copy to top
-							int done =
-								getPacketData(sd->fd, gIb->buf, &gIb->buf_ptr,
-											  (uint8_t *)top, top_size);
-
-							if (done == YES) {
-								close(sd->fd);
-								deleteFDInEpoll(sd->fd);
-								removeTask(top->taskID);
-								ib->taken = 0;
-							} else if (done == ERROR || done == UNKNOWN) {
-								break;
-							}
-						} else if (packet_type == TASK_PACKET) {
-							// copy to tp
-							int done =
-								getPacketData(sd->fd, gIb->buf, &gIb->buf_ptr,
-											  (uint8_t *)tp, tp_size);
-
-							if (done == YES) {
-								printc(INFO, "assigner - handle_gateway_fd",
-									   "new task via UDP %d\n", tp->taskID);
-								processTaskPacket();
-							} else if (done == ERROR || done == UNKNOWN) {
-								break;
-							}
-						} else if (packet_type == ERROR) {
+						} else if (done == ERROR || done == UNKNOWN) {
 							break;
 						}
+					} else if (packet_type == TASK_OVER_PACKET) {
+						// copy to top
+						int done =
+							getPacketData(sd->fd, gIb->buf, &gIb->buf_ptr,
+										  (uint8_t *)top, top_size);
+
+						if (done == YES) {
+							close(sd->fd);
+							deleteFDInEpoll(sd->fd);
+							removeTask(top->taskID);
+							ib->taken = 0;
+						} else if (done == ERROR || done == UNKNOWN) {
+							break;
+						}
+					} else if (packet_type == TASK_PACKET) {
+						// copy to tp
+						int done =
+							getPacketData(sd->fd, gIb->buf, &gIb->buf_ptr,
+										  (uint8_t *)tp, tp_size);
+
+						if (done == YES) {
+							printc(INFO, "assigner - handle_gateway_fd",
+								   "new task via UDP %d\n", tp->taskID);
+							processTaskPacket();
+						} else if (done == ERROR || done == UNKNOWN) {
+							break;
+						}
+					} else if (packet_type == ERROR) {
+						t->top_buf_ptr = -1;
+						break;
 					}
 				}
 			}
 		}
 
-		modifyFDInEpoll(sd->fd, EPOLL_IN | EPOLLOUT | EPOLL_DESTROY, sd);
-	} else if (events & EPOLL_DESTROY) {
+		if (changed == 1) {
+			modifyFDInEpoll(sd->fd, EPOLL_IN | EPOLLOUT | EPOLL_DESTROY, sd);
+		}
+	}
+
+	if (events & EPOLL_DESTROY) {
 		// connection dropped
 		printc(INFO, "assigner - handle_worker_fd", "connection cut\n");
 		for (int i = 0; i < taskListLength; i++) {
@@ -623,7 +697,9 @@ void handle_worker_fd(struct socketDetails *sd) {
 		}
 		ib->taken = 0;
 		ib->buf_ptr = 0;
-	} else if (events & EPOLLIN) {
+	}
+
+	if (events & EPOLLIN) {
 		// listen for incoming connections
 		// some output from the worker, pass it to the gateway
 		while (1) {
@@ -817,7 +893,13 @@ struct IntermediateBuffer *getNodeIB(int fd) {
 		}
 	}
 
-	return getIB();
+	struct IntermediateBuffer *ib = getIB();
+	memset(ib->buf, 0, sizeof(ib->buf));
+	ib->buf_ptr = 0;
+	ib->fd = fd;
+	ib->filled = 0;
+	ib->taken = 1;
+	return ib;
 }
 
 struct IntermediateBuffer *getIB() {
@@ -1025,14 +1107,10 @@ int processTaskPacket() {
 		printc(IMP, "assigner - processTaskPacket",
 			   "TCP connection request: %s, task: %d\n", getPrintableIP(addr),
 			   tp->taskID);
-		struct socketDetails *newSd =
-			amalloc(&arena, sizeof(struct socketDetails));
-		newSd->fd = gateway_fd;
-		newSd->handler = handle_gateway_fd;
-		struct IntermediateBuffer *ib =
-			amalloc(&arena, sizeof(struct IntermediateBuffer));
-		newSd->data = ib;
-		requestTCPConnection(gateway_fd, addr, newSd);
+		if (gateway_fd_sd->data == NULL) {
+			gateway_fd_sd->data = getNodeIB(gateway_fd);
+		}
+		requestTCPConnection(gateway_fd, addr, gateway_fd_sd);
 	}
 
 	// add to task list
@@ -1189,21 +1267,21 @@ int addToTaskList(int fd, int taskID, struct sockaddr_in *given_addr) {
 			taskList[i].filled = 1;
 			taskList[i].top_fd = fd;
 			taskList[i].bottom_fd = -1;
-			taskList[i].top_buf_ptr = 0;
-			taskList[i].bottom_buf_ptr = 0;
+			taskList[i].top_buf_ptr = -1;
+			taskList[i].bottom_buf_ptr = -1;
 			taskList[i].lastConnected = getCurrTime();
 
 			taskList[i].top_sd = amalloc(&arena, sizeof(struct socketDetails));
 			taskList[i].top_sd->data = getNodeIB(fd);
 			taskList[i].top_sd->fd = fd;
-			taskList[i].top_sd->handler = handle_gateway_fd;
+			taskList[i].top_sd->handler = &handle_gateway_fd;
 			taskList[i].top_sd->events = 0;
 
 			taskList[i].bottom_sd =
 				amalloc(&arena, sizeof(struct socketDetails));
 			taskList[i].bottom_sd->data = NULL;
 			taskList[i].bottom_sd->fd = -1;
-			taskList[i].bottom_sd->handler = handle_worker_fd;
+			taskList[i].bottom_sd->handler = &handle_worker_fd;
 			taskList[i].bottom_sd->events = 0;
 
 			return EXIT_SUCCESS;
@@ -1223,7 +1301,8 @@ int removeFromRetryList(int fd, struct sockaddr_in *given_addr,
 	for (int i = 0; i < retryPacketsListLength; i++) {
 		if (retryPacketsList[i].filled == 1 && retryPacketsList[i].fd == fd &&
 			retryPacketsList[i].packet_type == packet_type &&
-			memcmp(&retryPacketsList[i].addr, given_addr, addrLen) == 0) {
+			memcmp(&retryPacketsList[i].addr.sin_addr.s_addr,
+				   &given_addr->sin_addr.s_addr, sizeof(in_addr_t)) == 0) {
 			retryPacketsList[i].filled = 0;
 			return YES;
 		}
@@ -1356,6 +1435,7 @@ int tcpConnectionExists(int fd) {
 int requestTCPConnection(int fd, struct sockaddr_in *given_addr, void *data) {
 	if (fd < 0) {
 		// invalid fd
+		printc(RED, "assigner - requestTCPConnection", "Invalid fd: %d\n", fd);
 		return EXIT_FAILURE;
 	}
 
@@ -1367,22 +1447,32 @@ int requestTCPConnection(int fd, struct sockaddr_in *given_addr, void *data) {
 
 	if (res == 0) {
 		// connected instantly
+		printc(INFO, "assigner - requestTCPConnection",
+			   "Connected instantly\n");
 		if (addFDToEpoll(fd, EPOLL_IN | EPOLLOUT | EPOLL_DESTROY, data) < 0) {
 			// epoll add failed
+			printc(RED, "assigner - requestTCPConnection", "epoll failed\n");
+			perror("epoll");
 			close(fd);
 			return EXIT_FAILURE;
 		}
 		return EXIT_SUCCESS;
 	} else if (res < 0 && errno == EINPROGRESS) {
 		// connection in progress
-		if (addFDToEpoll(fd, EPOLLOUT | EPOLLET, data) < 0) {
+		if (addFDToEpoll(fd, EPOLL_OUT | EPOLL_DESTROY, data) < 0) {
 			// epoll add failed
+			printc(RED, "assigner - requestTCPConnection", "epoll failed\n");
+			perror("epoll");
 			close(fd);
 			return EXIT_FAILURE;
 		}
+		printc(INFO, "assigner - requestTCPConnection",
+			   "Connection in progress\n");
 		return EXIT_SUCCESS;
 	} else {
 		// some unknown, currently impossible response
+		printc(RED, "assigner - requestTCPConnection",
+			   "unknown impossible response: %d, errno: %d\n", res, errno);
 		close(fd);
 		return EXIT_FAILURE;
 	}

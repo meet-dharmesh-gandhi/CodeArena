@@ -21,7 +21,9 @@ cG.init((path) => {
 	console.log("init called");
 	chdir("../../");
 	// console.log(execSync("ls").toString());
-	spawn(path);
+	spawn(path, {
+		stdio: "inherit",
+	});
 	const run = () => {
 		console.log("wss size", wss.clients.size);
 		if (wss.clients.size == 0) {
@@ -70,7 +72,7 @@ wss.on("connection", (ws) => {
 	}
 
 	ws.on("message", (message) => {
-		console.log("message");
+		console.log("message:", message);
 		// tell c that a new message has arrived
 		if (cG.onMessage(message, taskID)) {
 			ws.pause();

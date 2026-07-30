@@ -9,6 +9,7 @@
 #include "network.h"
 #include "print.h"
 #include "utils.h"
+#include <execinfo.h>
 
 #include <errno.h>
 #include <fcntl.h>

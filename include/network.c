@@ -91,10 +91,13 @@ int createSocket(const char *port_number, int waiting_queue, int sock_type,
 		return -1;
 	}
 
+	printc(RED, "createSocket", "is addrs NULL? %d\n", addrs == NULL ? 1 : 0);
+
 	for (p = addrs; p != NULL; p = p->ai_next) {
 		sin = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
 
 		if (sin == -1) {
+			printc(RED, "createSocket", "sin is -1\n");
 			continue;
 		}
 
@@ -109,6 +112,8 @@ int createSocket(const char *port_number, int waiting_queue, int sock_type,
 			socklen_t optlen = va_arg(args, socklen_t);
 
 			if (setsockopt(sin, level, optname, optval, optlen) == -1) {
+				printc(RED, "createSocket", "setsockopt failed: %d, %s\n",
+					   errno, strerror(errno));
 				close(sin);
 				toContinue = 1;
 				break;
@@ -122,6 +127,8 @@ int createSocket(const char *port_number, int waiting_queue, int sock_type,
 		}
 
 		if (bind(sin, p->ai_addr, p->ai_addrlen) == -1) {
+			printc(RED, "createSocket", "bind failed: %d, %s\n", errno,
+				   strerror(errno));
 			close(sin);
 			continue;
 		}
@@ -136,8 +143,11 @@ int createSocket(const char *port_number, int waiting_queue, int sock_type,
 	freeaddrinfo(addrs);
 
 	if (p == NULL) {
+		printc(RED, "createSocket", "p is NULL\n");
 		return -1;
 	}
+
+	printc(IMP, "createSocket", "Function ends! ----------------\n");
 
 	return sin;
 }

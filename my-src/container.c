@@ -47,6 +47,8 @@ int run_container(void *arg) {
 	int recved = recvFull(container_fd, buf, required, 0);
 
 	if (recved == EXIT_FAILURE) {
+		printc(RED, "container - runContainer", "recved exit failure\n");
+		perror("recv");
 		exit(1);
 	}
 
@@ -56,12 +58,17 @@ int run_container(void *arg) {
 
 	if (n_files > MAX_FILES) {
 		// invalid number of files
+		printc(RED, "container - runContainer",
+			   "Files more than max allowed\n");
 		exit(1);
 	}
 
 	for (int i = 0; i < n_files; i++) {
 		createFile(container_fd);
 	}
+
+	free(buf);
+	free(filename);
 
 	printc(INFO, "container - run_container", "Files created\n");
 
