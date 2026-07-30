@@ -277,8 +277,10 @@ void handle_container(struct socketDetails *sd) {
 		int changed = 0;
 		// ready to receive output
 		for (int i = 0; i < taskListLength; i++) {
-			if (taskList[i].filled == 1 && taskList[i].bottom_fd == sd->fd) {
+			if (taskList[i].filled == 1 && taskList[i].bottom_fd == sd->fd &&
+				taskList[i].top_buf_ptr != -1) {
 				changed = 1;
+				printc(INFO, "worker - handle_container", "Task %d\n", i);
 				struct TaskDetail *t = &taskList[i];
 				int required = t->top_filled - t->top_buf_ptr;
 				int sent = send(t->bottom_fd, &t->top_buf + t->top_buf_ptr,
@@ -332,6 +334,7 @@ void handle_container(struct socketDetails *sd) {
 							break;
 						}
 					} else if (packet_type == ERROR) {
+						t->top_buf_ptr = -1;
 						break;
 					}
 				}
@@ -371,13 +374,14 @@ void handle_container(struct socketDetails *sd) {
 					break;
 				}
 
-				int recved = recv(sd->fd, &ib->buf + ib->buf_ptr, required, 0);
+				int recved = recv(sd->fd, ib->buf + ib->buf_ptr, required, 0);
 
 				if (recved == -1 && (errno == EWOULDBLOCK || errno == EAGAIN)) {
 					break;
-				} else {
+				} else if (recved == -1) {
 					printc(RED, "worker - handle_container",
-						   "Socket unknown error\n");
+						   "Socket unknown error, recved: %d, errno: %d\n",
+						   recved, errno);
 					perror("UDS");
 					break;
 				}
@@ -800,7 +804,9 @@ void createContainer(struct TaskDetail *t) {
 	writeToPath(map_buf, container_pid, "gid_map");
 
 	t->bottom_fd = uds[0];
-	addFDToEpoll(uds[0], EPOLL_OUT | EPOLL_DESTROY, t->bottom_sd);
+	t->bottom_sd->fd = uds[0];
+	setNonBlocking(t->bottom_fd);
+	addFDToEpoll(uds[0], EPOLL_OUT | EPOLLIN | EPOLL_DESTROY, t->bottom_sd);
 
 	printc(INFO, "worker - createContainer", "Container created\n");
 }
@@ -936,6 +942,7 @@ int addToTaskList(int taskID, int assigner_fd, struct sockaddr *given_addr) {
 		}
 
 		taskList[taskID].top_fd = fd;
+		setNonBlocking(taskList[taskID].top_fd);
 	} else {
 		taskList[taskID].top_fd = assigner_fd;
 	}
@@ -1056,8 +1063,10 @@ int requestTCPConnection(int fd, struct sockaddr_in *given_addr, void *data) {
 
 	int res = connect(fd, (struct sockaddr *)given_addr, addrLen);
 
-	if (res == 0) {
+	if (res == 0 || errno == EINPROGRESS) {
 		// connected instantly
+		printc(INFO, "worker - requestTCPConnection", "Connected: %d\n",
+			   res == 0);
 		printc(INFO, "worker - requestTCPConnection", "Connected instantly\n");
 		if (addFDToEpoll(fd, EPOLL_IN | EPOLLOUT | EPOLL_DESTROY, data) < 0) {
 			// epoll add failed
@@ -1066,18 +1075,6 @@ int requestTCPConnection(int fd, struct sockaddr_in *given_addr, void *data) {
 			close(fd);
 			return EXIT_FAILURE;
 		}
-		return EXIT_SUCCESS;
-	} else if (res < 0 && errno == EINPROGRESS) {
-		// connection in progress
-		if (addFDToEpoll(fd, EPOLL_OUT | EPOLL_DESTROY, data) < 0) {
-			// epoll add failed
-			printc(RED, "worker - requestTCPConnection", "epoll failed\n");
-			perror("epoll");
-			close(fd);
-			return EXIT_FAILURE;
-		}
-		printc(INFO, "worker - requestTCPConnection",
-			   "Connection in progress\n");
 		return EXIT_SUCCESS;
 	} else {
 		// some unknown, currently impossible response

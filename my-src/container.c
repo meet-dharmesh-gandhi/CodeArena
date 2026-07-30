@@ -79,11 +79,16 @@ int run_container(void *arg) {
 
 	execl("/bin/sh", "sh", NULL);
 
+	printc(ERR, "container - run_container", "Container finished running!\n");
+	perror("execl");
+
 	exit(1);
 }
 
 void connectFD(int source_fd, int target_fd) {
 	if (dup2(source_fd, target_fd) == -1) {
+		printc(ERR, "container - connectFD", "Could not use dup2\n");
+		perror("dup2");
 		exit(1);
 	}
 }

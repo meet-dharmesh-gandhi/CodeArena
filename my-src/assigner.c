@@ -165,6 +165,7 @@ int main(int argc, char const *argv[]) {
 	discover_fd = getNewSocket(DISCOVER_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
 
 	gateway_fd = socket(AF_INET, SOCK_STREAM, 0);
+	setNonBlocking(gateway_fd);
 	// getNewSocket(ASSIGNER_GATEWAY_TASK_PORT, SOCKET_TIMEOUT, SOCK_STREAM);
 	accept_worker_fd = getNewSocket(TASK_PORT, SOCKET_TIMEOUT, SOCK_STREAM);
 
@@ -355,6 +356,7 @@ void handle_accept_worker_fd(struct socketDetails *sd) {
 							if (taskList[i].filled == 1 &&
 								taskList[i].bottom_fd == -1) {
 								taskList[i].bottom_fd = res;
+								setNonBlocking(taskList[i].bottom_fd);
 								taskList[i].bottom_sd->data = getNodeIB(res);
 							}
 						}
@@ -497,8 +499,7 @@ void handle_gateway_fd(struct socketDetails *sd) {
 		if (hasStarted == 0) {
 			printc(INFO, "assigner - handle_gateway_fd",
 				   "fd modified, added EPOLLIN\n");
-			modifyFDInEpoll(sd->fd,
-							EPOLLET | EPOLLIN | EPOLLOUT | EPOLL_DESTROY, sd);
+			modifyFDInEpoll(sd->fd, EPOLL_IN | EPOLLOUT | EPOLL_DESTROY, sd);
 		}
 	}
 
@@ -1445,10 +1446,9 @@ int requestTCPConnection(int fd, struct sockaddr_in *given_addr, void *data) {
 
 	int res = connect(fd, (struct sockaddr *)given_addr, addrLen);
 
-	if (res == 0) {
-		// connected instantly
-		printc(INFO, "assigner - requestTCPConnection",
-			   "Connected instantly\n");
+	if (res == 0 || errno == EINPROGRESS) {
+		printc(INFO, "assigner - requestTCPConnection", "Connected: %d\n",
+			   res == 0);
 		if (addFDToEpoll(fd, EPOLL_IN | EPOLLOUT | EPOLL_DESTROY, data) < 0) {
 			// epoll add failed
 			printc(RED, "assigner - requestTCPConnection", "epoll failed\n");
@@ -1456,18 +1456,6 @@ int requestTCPConnection(int fd, struct sockaddr_in *given_addr, void *data) {
 			close(fd);
 			return EXIT_FAILURE;
 		}
-		return EXIT_SUCCESS;
-	} else if (res < 0 && errno == EINPROGRESS) {
-		// connection in progress
-		if (addFDToEpoll(fd, EPOLL_OUT | EPOLL_DESTROY, data) < 0) {
-			// epoll add failed
-			printc(RED, "assigner - requestTCPConnection", "epoll failed\n");
-			perror("epoll");
-			close(fd);
-			return EXIT_FAILURE;
-		}
-		printc(INFO, "assigner - requestTCPConnection",
-			   "Connection in progress\n");
 		return EXIT_SUCCESS;
 	} else {
 		// some unknown, currently impossible response
