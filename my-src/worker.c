@@ -284,7 +284,7 @@ void handle_container(struct socketDetails *sd) {
 				struct TaskDetail *t = &taskList[i];
 				int required = t->top_filled - t->top_buf_ptr;
 				int sent =
-					write(t->bottom_fd, &t->top_buf + t->top_buf_ptr, required);
+					write(t->bottom_fd, t->top_buf + t->top_buf_ptr, required);
 
 				if (sent < required) {
 					t->top_buf_ptr += max(sent, 0);
@@ -407,12 +407,12 @@ void handle_container(struct socketDetails *sd) {
 			struct TaskDetail *t = &taskList[taskID];
 
 			iop->packet_ID = PACKET_ID;
-			iop->packet_type = IO_PACKET;
+			iop->packet_type = htonl(IO_PACKET);
 			iop->node_type = WORKER_NODE;
 			iop->UID = UID;
 			iop->task_ID = taskID;
 			iop->data_size = ib->filled;
-			memcpy(&iop->data, &ib->buf, ib->filled);
+			memcpy(iop->data, ib->buf, ib->filled);
 
 			printc(INFO, "worker - handle_container", "data: ");
 			for (int i = 0; i < ib->filled; i++) {
@@ -421,16 +421,18 @@ void handle_container(struct socketDetails *sd) {
 			printf("|\n");
 
 			ib->buf_ptr = 0;
+			ib->filled += (iop_size - MAX_DATA_CAPACITY);
 
 			int sent = send(t->top_fd, iop, ib->filled, 0);
 			printc(INFO, "worker - handle_container", "sent data size: %d\n",
 				   iop->data_size);
+			printc(INFO, "worker - handle_container", "iop: %b\n", iop);
 
 			if (sent < ib->filled) {
 				printc(INFO, "worker - handle_container",
 					   "could send only: %d, maybe error: %d\n", sent, errno);
 				memcpy(&t->bottom_buf, iop, ib->filled);
-				t->bottom_buf_ptr += max(sent, 0);
+				t->bottom_buf_ptr = max(sent, 0);
 				t->bottom_filled = ib->filled;
 
 				modifyFDInEpoll(sd->fd, EPOLL_OUT | EPOLL_DESTROY, sd);
@@ -492,7 +494,7 @@ void handle_assigner_fd(struct socketDetails *sd) {
 				changed = 1;
 				struct TaskDetail *t = &taskList[i];
 				int required = t->bottom_filled - t->bottom_buf_ptr;
-				int sent = send(t->top_fd, &t->bottom_buf + t->bottom_buf_ptr,
+				int sent = send(t->top_fd, t->bottom_buf + t->bottom_buf_ptr,
 								required, 0);
 
 				if (sent < required) {
@@ -500,24 +502,29 @@ void handle_assigner_fd(struct socketDetails *sd) {
 					return;
 				}
 
-				t->bottom_buf_ptr = 0;
+				t->bottom_buf_ptr = -1;
 
 				struct IntermediateBuffer *wIb = getNodeIB(t->bottom_fd);
 				while (1) {
-					printc(INFO, "worker - handle_assigner_fd", "EPOLLIN\n");
+					printc(INFO, "worker - handle_assigner_fd",
+						   "EPOLLOUT - EPOLLIN\n");
 					int bufFull = 0;
 					while (1) {
 						int required = MAX_DATA_CAPACITY - wIb->buf_ptr;
 						if (required == 0) {
 							bufFull = 1;
+							printc(INFO, "worker - handle_assigner_fd",
+								   "EPOLLOUT - buffer full\n");
 							break;
 						}
 
-						int recved = read(t->bottom_fd,
-										  &wIb->buf + wIb->buf_ptr, required);
+						int recved = read(t->bottom_fd, wIb->buf + wIb->buf_ptr,
+										  required);
 
 						if (recved == -1 &&
 							(errno == EWOULDBLOCK || errno == EAGAIN)) {
+							printc(INFO, "worker - handle_assigner_fd",
+								   "EPOLLOUT - assigner socket drained\n");
 							break;
 						} else {
 							printc(RED, "worker - handle_assigner_fd",
@@ -527,21 +534,34 @@ void handle_assigner_fd(struct socketDetails *sd) {
 						}
 					}
 
+					printc(INFO, "worker - handle_assigner_fd",
+						   "buf_ptr: %d, MAX_DATA_CAPACITY: %d\n", wIb->buf_ptr,
+						   MAX_DATA_CAPACITY);
+
 					wIb->filled = wIb->buf_ptr;
 
+					if (wIb->filled == 0) {
+						break;
+					}
+
 					iop->packet_ID = PACKET_ID;
-					iop->packet_type = IO_PACKET;
+					iop->packet_type = htonl(IO_PACKET);
 					iop->node_type = WORKER_NODE;
 					iop->UID = UID;
 					iop->task_ID = i;
+					iop->data_size = wIb->filled;
 					memcpy(&iop->data, &wIb->buf, wIb->filled);
 
 					wIb->buf_ptr = 0;
+					wIb->filled += (iop_size - MAX_DATA_CAPACITY);
 
 					int sent = send(t->top_fd, iop, wIb->filled, 0);
+					printc(INFO, "worker - handle_assigner_fd",
+						   "Sent to assigner - EPOLLOUT: %d, filled: %d\n",
+						   sent, wIb->filled);
 
 					if (sent < wIb->filled) {
-						t->bottom_buf_ptr += max(sent, 0);
+						t->bottom_buf_ptr = max(sent, 0);
 						memcpy(&t->bottom_buf, iop, wIb->filled);
 						t->bottom_filled = wIb->filled;
 						return;
@@ -549,6 +569,11 @@ void handle_assigner_fd(struct socketDetails *sd) {
 
 					if (bufFull == 0) {
 						break;
+					}
+
+					if (wIb->buf_ptr < MAX_DATA_CAPACITY) {
+						t->bottom_buf_ptr = -1;
+						wIb->filled = 0;
 					}
 				}
 			}
@@ -558,6 +583,9 @@ void handle_assigner_fd(struct socketDetails *sd) {
 			printc(INFO, "worker - handle_assigner_fd",
 				   "EPOLLOUT - All packets over\n");
 			modifyFDInEpoll(sd->fd, EPOLL_IN | EPOLLOUT | EPOLL_DESTROY, sd);
+		} else {
+			printc(INFO, "worker - handle_assigner_fd",
+				   "EPOLLOUT - nothing changed\n");
 		}
 	}
 
@@ -588,11 +616,13 @@ void handle_assigner_fd(struct socketDetails *sd) {
 					printc(INFO, "worker - handle_assigner_fd",
 						   "IO Packet, task: %d\n", iop->task_ID);
 					struct TaskDetail *t = &taskList[iop->task_ID];
-					int sent = write(t->bottom_fd, iop->data, ib->filled);
+					int sent =
+						write(t->bottom_fd, iop->data,
+							  ib->filled - (iop_size - MAX_DATA_CAPACITY));
 
-					if (sent < ib->filled) {
-						t->bottom_buf_ptr = max(sent, 0);
-						memcpy(&t->bottom_buf, iop, ib->filled);
+					if (sent < ib->filled - (iop_size - MAX_DATA_CAPACITY)) {
+						t->top_buf_ptr = max(sent, 0);
+						memcpy(&t->top_buf, iop, ib->filled);
 						t->bottom_filled = ib->filled;
 
 						modifyFDInEpoll(sd->fd, EPOLL_DESTROY | EPOLL_OUT, sd);
@@ -728,11 +758,13 @@ struct IntermediateBuffer *getNodeIB(int fd) {
 	}
 
 	struct IntermediateBuffer *ib = getIB();
-	memset(ib->buf, 0, sizeof(ib->buf));
-	ib->buf_ptr = 0;
-	ib->fd = fd;
-	ib->filled = 0;
-	ib->taken = 1;
+	if (ib != NULL) {
+		memset(ib->buf, 0, sizeof(ib->buf));
+		ib->buf_ptr = 0;
+		ib->fd = fd;
+		ib->filled = 0;
+		ib->taken = 1;
+	}
 	return ib;
 }
 

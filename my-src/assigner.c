@@ -321,7 +321,9 @@ void handle_accept_worker_fd(struct socketDetails *sd) {
 	if (sd->events & EPOLLOUT) {
 		drainSocket(sd->fd, SOCK_STREAM);
 		modifyFDInEpoll(sd->fd, EPOLL_IN, sd);
-	} else if (sd->events & EPOLLIN) {
+	}
+
+	if (sd->events & EPOLLIN) {
 		// new connection request(s)
 
 		while (1) {
@@ -336,6 +338,8 @@ void handle_accept_worker_fd(struct socketDetails *sd) {
 					continue;
 				}
 			} else {
+				printc(INFO, "assigner - handle_accept_worker_fd",
+					   "new connection\n");
 				// if the role is changed, close the socket
 				if (roleChanged == 1) {
 					close(res);
@@ -348,17 +352,30 @@ void handle_accept_worker_fd(struct socketDetails *sd) {
 						memcmp(&expectedConnectionsList[i].addr.sin_addr.s_addr,
 							   &addr->sin_addr.s_addr,
 							   sizeof(in_addr_t)) == 0) {
-						printc(INFO, "assigner - accept_worker_fd",
+						printc(INFO, "assigner - handle_accept_worker_fd",
 							   "new worker recved, ip: %s\n",
 							   getPrintableIP(addr));
 						// connection was expected, add to epoll
+						int ind = -1;
 						for (int i = 0; i < taskListLength; i++) {
 							if (taskList[i].filled == 1 &&
 								taskList[i].bottom_fd == -1) {
+								printc(INFO,
+									   "assigner - handle_accept_worker_fd",
+									   "Found task %d\n", i);
+								ind = i;
 								taskList[i].bottom_fd = res;
 								setNonBlocking(taskList[i].bottom_fd);
 								taskList[i].bottom_sd->data = getNodeIB(res);
+								taskList[i].bottom_sd->fd = res;
 							}
+						}
+						if (ind != -1) {
+							printc(INFO, "assigner - handle_accept_worker_fd",
+								   "adding fd to epoll\n");
+							addFDToEpoll(res,
+										 EPOLL_IN | EPOLLOUT | EPOLL_DESTROY,
+										 taskList[ind].bottom_sd);
 						}
 						expectedConnectionsList[i].filled = 0;
 						removeFromRetryList(task_fd, addr, TASK_PACKET);
@@ -597,6 +614,7 @@ void handle_gateway_fd(struct socketDetails *sd) {
 void handle_worker_fd(struct socketDetails *sd) {
 	int events = sd->events;
 	struct IntermediateBuffer *ib = (struct IntermediateBuffer *)sd->data;
+	printc(INFO, "assigner - handle_worker_fd", "events: %d\n", events);
 
 	if (events & EPOLLOUT) {
 		int changed = 0;
@@ -701,24 +719,34 @@ void handle_worker_fd(struct socketDetails *sd) {
 	}
 
 	if (events & EPOLLIN) {
+		printc(INFO, "assigner - handle_worker_fd", "EPOLLIN\n");
 		// listen for incoming connections
 		// some output from the worker, pass it to the gateway
 		while (1) {
 			int packet_type = getPacketType(sd->fd, ib->buf, &ib->buf_ptr);
+			printc(INFO, "assigner - handle_worker_fd", "packet_type: %d\n",
+				   packet_type);
 
 			if (packet_type == IO_PACKET) {
 				// copy to iop
 				int done = getIOPacketData(sd->fd, ib->buf, &ib->buf_ptr, iop,
 										   &ib->filled);
 
+				printc(INFO, "assigner - handle_worker_fd", "done: %d\n", done);
+
 				if (done == YES) {
 					printc(INFO, "assigner - handle_worker_fd",
 						   "Got IO packet, task: %d\n", iop->task_ID);
 					// now forward this data to the gateway
+					struct TaskDetail *t = &taskList[iop->task_ID];
+					if (t->filled == 0) {
+						// invalid taskID, ignore
+						continue;
+					}
+
 					int sent = send(gateway_fd, iop, ib->filled, 0);
 
 					if (sent < ib->filled) {
-						struct TaskDetail *t = &taskList[iop->task_ID];
 						// copy to bottom_buf
 						memcpy(t->bottom_buf, iop, ib->filled);
 						t->bottom_buf_ptr = max(sent, 0);

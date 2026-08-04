@@ -166,6 +166,11 @@ int getPacketType(int fd, uint8_t *fd_buf, int *fd_buf_ptr) {
 			memcpy(&packet_id, fd_buf, sizeof(int));
 			printc(INFO, "getPacketType", "packet_id: %d\n",
 				   packet_id == PACKET_ID);
+			if (packet_id != PACKET_ID) {
+				// TODO read the socket until PACKET_ID is found again or the
+				// socket drains
+				return UNKNOWN;
+			}
 			int packet_type;
 			memcpy(&packet_type, sizeof(int) + fd_buf, sizeof(int));
 			printc(INFO, "getPacketType", "packet type: %d\n", packet_type);
@@ -176,6 +181,7 @@ int getPacketType(int fd, uint8_t *fd_buf, int *fd_buf_ptr) {
 		if (recved == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
 			return ERROR;
 		} else if (recved == -1) {
+			perror("recv");
 			return UNKNOWN;
 		}
 
