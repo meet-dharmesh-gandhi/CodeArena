@@ -16,9 +16,18 @@ struct Task {
 	size_t client_buf_size;
 	uv_poll_t poll_handle;
 	napi_ref cb;
+	napi_threadsafe_function tsfn_cb;
 	napi_ref close_cb;
+	napi_threadsafe_function tsfn_close_cb;
 	napi_ref message_cb;
+	napi_threadsafe_function tsfn_message_cb;
 	napi_env env;
+};
+
+struct MessageCbData {
+	struct Task *task;
+	uint8_t *data;
+	size_t data_size;
 };
 
 struct arp_header {
@@ -74,6 +83,7 @@ const int fmp_size = sizeof(struct find_monitor_packet);
 
 napi_ref end_cb;
 napi_env end_cb_env;
+napi_threadsafe_function tsfn_end_cb;
 int ended;
 
 int garp();
@@ -122,6 +132,69 @@ napi_value napiBool(napi_env env, int boolean);
 napi_value napiInt32(napi_env env, int i);
 napi_value napiUndefined(napi_env env);
 napi_value napiPanic(napi_env env);
+
+void callCb(napi_env env, napi_value func, void *context, void *data) {
+	int *taskID = (int *)data;
+
+	napi_value global = getNapiGlobal(env);
+	napi_value taskIDValue;
+	napi_create_int32(env, *taskID, &taskIDValue);
+	napi_call_function(env, global, func, 1, &taskIDValue, NULL);
+	free(taskID);
+}
+
+void callMessageCb(napi_env env, napi_value func, void *context, void *data) {
+	struct MessageCbData *messageData = (struct MessageCbData *)data;
+
+	napi_handle_scope scope;
+	napi_open_handle_scope(env, &scope);
+
+	napi_value buffer;
+	uint8_t *buffer_data;
+	napi_status status = napi_create_buffer(env, messageData->data_size,
+											(void **)&buffer_data, &buffer);
+
+	if (status != napi_ok) {
+		printc(RED, "Gateway - handle_assigner_fd",
+			   "Could not create napi buffer\n");
+		printNapiError(env, "handle_assigner_fd - UV_READABLE");
+
+		napi_close_handle_scope(env, scope);
+		free(messageData->data);
+		free(messageData);
+		return;
+	}
+
+	memcpy(buffer_data, messageData->data, messageData->data_size);
+
+	napi_value global = getNapiGlobal(env);
+	napi_value result;
+	napi_call_function(env, global, func, 1, &buffer, &result);
+
+	napi_valuetype var_type;
+	if (napi_typeof(env, result, &var_type) == napi_ok &&
+		var_type == napi_boolean) {
+		bool wsFilled;
+		if (napi_get_value_bool(env, result, &wsFilled) == napi_ok &&
+			wsFilled == 1) {
+			uv_poll_stop((uv_poll_t *)&messageData->task->poll_handle);
+		}
+	}
+
+	napi_close_handle_scope(env, scope);
+	free(messageData->data);
+	free(messageData);
+}
+
+void callEndCb(napi_env env, napi_value func, void *context, void *data) {
+	napi_value path;
+	napi_create_string_utf8(end_cb_env, EMPTY_NODE_PATH, NAPI_AUTO_LENGTH,
+							&path);
+	napi_value end_fn;
+	getNapiFunction(end_cb_env, end_cb, &end_fn);
+	napi_call_function(end_cb_env, getNapiGlobal(end_cb_env), end_fn, 1, &path,
+					   NULL);
+}
 
 napi_value Start(napi_env env, napi_value exports) {
 	// if (garp() == NO) {
@@ -401,6 +474,7 @@ void handle_accept_assigner_fd(uv_poll_t *handle, int status, int events) {
 			continue;
 		}
 
+		t->assigner_fd = res;
 		t->active = 1;
 		t->created_at = getCurrTime();
 
@@ -426,17 +500,8 @@ void handle_assigner_fd_close(uv_handle_t *handle) {
 	t->active = 0;
 	t->created_at = getCurrTime();
 
-	napi_value taskID;
-	napi_create_int32(t->env, t->taskID, &taskID);
-	napi_value close_cb;
-	getNapiFunction(t->env, t->close_cb, &close_cb);
-
-	status = napi_call_function(t->env, global, close_cb, 1, &taskID, NULL);
-	if (status != napi_ok) {
-		napi_close_handle_scope(t->env, scope);
-		printNapiError(t->env, "handle_assigner_fd");
-		return;
-	}
+	napi_call_threadsafe_function(t->tsfn_close_cb, &t->taskID,
+								  napi_tsfn_blocking);
 
 	t->filled = 0;
 	close(t->assigner_fd);
@@ -531,18 +596,8 @@ void handle_assigner_fd(uv_poll_t *handle, int status, int events) {
 						return;
 					}
 
-					napi_value taskID;
-					napi_create_int32(t->env, t->taskID, &taskID);
-					napi_value cb;
-					getNapiFunction(t->env, t->cb, &cb);
-					napi_status status = napi_call_function(t->env, global, cb,
-															1, &taskID, NULL);
-					if (status != napi_ok) {
-						printc(RED, "Gateway - handle_assigner_fd",
-							   "Call to cb failed\n");
-						napi_close_handle_scope(t->env, scope);
-						return;
-					}
+					napi_call_threadsafe_function(t->tsfn_cb, &t->taskID,
+												  napi_tsfn_blocking);
 
 					modifyFDInNodeEpoll(&t->poll_handle, UV_READABLE,
 										handle_assigner_fd,
@@ -567,87 +622,30 @@ void handle_assigner_fd(uv_poll_t *handle, int status, int events) {
 		}
 
 		while (1) {
-			int packet_type =
-				getPacketType(task_fd, t->assigner_buf, &t->assigner_buf_ptr);
+			int packet_type = getPacketType(t->assigner_fd, t->assigner_buf,
+											&t->assigner_buf_ptr);
 
 			if (packet_type == IO_PACKET) {
-				int res = getIOPacketData(task_fd, t->assigner_buf,
+				int res = getIOPacketData(t->assigner_fd, t->assigner_buf,
 										  &t->assigner_buf_ptr, iop,
 										  &t->assigner_buf_filled);
 
 				if (res == YES) {
 					int dataSize =
 						t->assigner_buf_filled + MAX_DATA_CAPACITY - iop_size;
-					napi_value buffer;
-					uint8_t *buffer_data;
-					napi_status status = napi_create_buffer(
-						t->env, dataSize, (void *)&buffer_data, &buffer);
 
-					if (status != napi_ok) {
-						printc(RED, "Gateway - handle_assigner_fd",
-							   "Could not create napi buffer\n");
-						printNapiError(t->env,
-									   "handle_assigner_fd - UV_READABLE");
-						continue;
-					}
-
-					memcpy(buffer_data, &iop->data, dataSize);
-
-					napi_handle_scope scope;
-					napi_open_handle_scope(t->env, &scope);
-					napi_value global = getNapiGlobal(t->env);
-					if (global == NULL) {
-						printc(RED, "Gateway - handle_assigner_fd",
-							   "Could not get global\n");
-						napi_close_handle_scope(t->env, scope);
-						return;
-					}
-
-					napi_value result;
-					napi_value message_cb;
-					getNapiFunction(t->env, t->message_cb, &message_cb);
-					status = napi_call_function(t->env, global, message_cb, 1,
-												&buffer, &result);
-					if (status != napi_ok) {
-						printc(RED, "Gateway - handle_assigner_fd",
-							   "Could not call message_cb\n");
-						printNapiError(t->env,
-									   "handle_assigner_fd - message_cb");
-						napi_close_handle_scope(t->env, scope);
-						return;
-					}
-
-					napi_valuetype var_type;
-					status = napi_typeof(t->env, result, &var_type);
-					if (status != napi_ok || var_type != napi_boolean) {
-						printc(RED, "Gateway - handle_assigner_fd",
-							   "Function did not return boolean\n");
-						printNapiError(
-							t->env,
-							"handle_assigner_fd - return type message_cb");
-						napi_close_handle_scope(t->env, scope);
-						return;
-					}
-
-					bool wsFilled;
-					status = napi_get_value_bool(t->env, result, &wsFilled);
-					if (status != napi_ok) {
-						printc(RED, "Gateway - handle_assigner_fd",
-							   "Could not read boolean\n");
-						printNapiError(t->env, "handle_assigner_fd - return "
-											   "type message_cb extract");
-						napi_close_handle_scope(t->env, scope);
-						return;
-					}
-
-					if (wsFilled == 1) {
-						// stop the assigner
-						printc(RED, "Gateway - handle_assigner_fd",
-							   "WS filled\n");
-						uv_poll_stop(handle);
-					}
-					napi_close_handle_scope(t->env, scope);
+					struct MessageCbData *messageData =
+						malloc(sizeof(*messageData));
+					messageData->task = t;
+					messageData->data = malloc(dataSize);
+					messageData->data_size = dataSize;
+					memcpy(messageData->data, iop->data, dataSize);
+					napi_call_threadsafe_function(
+						t->tsfn_message_cb, messageData, napi_tsfn_blocking);
+					break;
 				}
+			} else if (packet_type == ERROR || packet_type == UNKNOWN) {
+				break;
 			}
 		}
 	}
@@ -680,6 +678,12 @@ napi_value Init(napi_env env, napi_callback_info info) {
 		return napiUndefined(env);
 	}
 	end_cb_env = env;
+
+	napi_value resource_name;
+	napi_create_string_utf8(env, "endCB", NAPI_AUTO_LENGTH, &resource_name);
+	napi_create_threadsafe_function(env, args[0], NULL, resource_name, 0, 1,
+									NULL, NULL, NULL, callEndCb, &tsfn_end_cb);
+
 	return napiUndefined(env);
 }
 
@@ -896,12 +900,27 @@ struct Task *addTask(napi_env env, napi_value cb, napi_value close_cb,
 			taskList[i].client_buf_size = 0;
 			memset(&taskList[i].poll_handle, 0, sizeof(uv_poll_t));
 			taskList[i].poll_handle.data = &taskList[i];
+
+			napi_value resource_name;
+			napi_create_string_utf8(env, "cb", NAPI_AUTO_LENGTH,
+									&resource_name);
+			napi_create_threadsafe_function(env, cb, NULL, resource_name, 0, 1,
+											NULL, NULL, NULL, callCb,
+											&taskList[i].tsfn_cb);
+
 			status = napi_create_reference(env, cb, 1, &taskList[i].cb);
 			if (status != napi_ok) {
 				taskList[i].filled = 0;
 				printNapiError(env, "Gatway - addTask - cb");
 				return NULL;
 			}
+
+			napi_create_string_utf8(env, "closeCB", NAPI_AUTO_LENGTH,
+									&resource_name);
+			napi_create_threadsafe_function(env, close_cb, NULL, resource_name,
+											0, 1, NULL, NULL, NULL, callCb,
+											&taskList[i].tsfn_close_cb);
+
 			status =
 				napi_create_reference(env, close_cb, 1, &taskList[i].close_cb);
 			if (status != napi_ok) {
@@ -909,6 +928,13 @@ struct Task *addTask(napi_env env, napi_value cb, napi_value close_cb,
 				printNapiError(env, "Gatway - addTask - close_cb");
 				return NULL;
 			}
+
+			napi_create_string_utf8(env, "messageCB", NAPI_AUTO_LENGTH,
+									&resource_name);
+			napi_create_threadsafe_function(
+				env, message_cb, NULL, resource_name, 0, 1, NULL, NULL, NULL,
+				callMessageCb, &taskList[i].tsfn_message_cb);
+
 			status = napi_create_reference(env, message_cb, 1,
 										   &taskList[i].message_cb);
 			if (status != napi_ok) {
@@ -932,17 +958,14 @@ void checkMonitor() {
 			ERR, "gateway - checkMonitor",
 			"Becoming an empty node, monitor did not reply for a long time\n");
 
-		napi_handle_scope scope;
-		napi_open_handle_scope(end_cb_env, &scope);
 		printc(INFO, "Gateway - checkMonitor", "Calling end function\n");
-		napi_value path;
-		napi_create_string_utf8(end_cb_env, EMPTY_NODE_PATH, NAPI_AUTO_LENGTH,
-								&path);
-		napi_value end_fn;
-		getNapiFunction(end_cb_env, end_cb, &end_fn);
-		napi_call_function(end_cb_env, getNapiGlobal(end_cb_env), end_fn, 1,
-						   &path, NULL);
-		napi_close_handle_scope(end_cb_env, scope);
+		napi_call_threadsafe_function(tsfn_end_cb, NULL, napi_tsfn_blocking);
+		// napi_value path;
+		// napi_create_string_utf8(end_cb_env, EMPTY_NODE_PATH,
+		// NAPI_AUTO_LENGTH, 						&path); napi_value end_fn;
+		// getNapiFunction(end_cb_env, end_cb, &end_fn);
+		// napi_call_function(end_cb_env, getNapiGlobal(end_cb_env), end_fn, 1,
+		// 				   &path, NULL);
 		ended = 1;
 	}
 }
