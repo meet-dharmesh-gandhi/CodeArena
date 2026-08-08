@@ -8,7 +8,7 @@ networks:
 services:
     empty:
         build: .
-        command: ["./my-src/empty"]
+        command: ["./src/empty"]
         networks:
             - codearena-lan
         privileged: true

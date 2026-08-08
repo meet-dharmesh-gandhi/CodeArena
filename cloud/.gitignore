@@ -1,0 +1,17 @@
+
+*
+!*.*
+!*/
+!Dockerfile
+
+**ignore**/
+**.ignore**
+*.env
+
+**/node_modules/**
+/node/**
+/make/**
+/g++/**
+/err/**
+
+**/build/**

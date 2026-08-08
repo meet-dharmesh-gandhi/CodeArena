@@ -1,6 +1,4 @@
-#!/bin/bash
-
-cd ./my-src
+cd ~/"Desktop/Code Files/CodeArena/cloud/src"
 
 toCompile=("assigner"  "monitor" "worker" "empty")
 deps="../include/constants.h ../include/all.h ../include/async.c ../include/memory.c ../include/morph.c ../include/network.c ../include/print.c ../include/utils.c"
@@ -14,6 +12,6 @@ echo "Compiling gateway"
 
 cd ./node
 
-npx node-gyp rebuild
+node-gyp rebuild
 
 echo "Done"

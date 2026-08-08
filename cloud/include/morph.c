@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-char *paths[] = {"cd ./my-src/node && npm run dev", MONITOR_NODE_PATH,
+char *paths[] = {"cd ./src/node && npm run dev", MONITOR_NODE_PATH,
 				 ASSIGNER_NODE_PATH, WORKER_NODE_PATH, EMPTY_NODE_PATH};
 
 void replace(char *str, int isPath);
@@ -36,7 +36,7 @@ void replace(char *str, int isPath) {
 		char *args[] = {str, NULL};
 		system("pwd");
 		system("ls");
-		system("ls my-src");
+		system("ls src");
 		printc(INFO, "morph - replace", "Replacing with: %s\n", str);
 		fflush(stdout);
 		fflush(stderr);
