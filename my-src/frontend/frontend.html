@@ -115,6 +115,7 @@
 
 				// Attempt connection
 				const ws = new WebSocket(`ws://localhost:${currentPort}`);
+				ws.binaryType = "arraybuffer";
 
 				ws.onopen = () => {
 					statusText.innerText = `Status: Connected to Gateway on Port ${currentPort}!`;
@@ -138,7 +139,14 @@
 
 				ws.onmessage = (event) => {
 					// This is where your PTY output from the container will arrive!
-					console.log("Container says:", event.data);
+					if (event.data instanceof ArrayBuffer) {
+						console.log(
+							"Container says:",
+							new TextDecoder("utf-8").decode(event.data),
+						);
+					} else {
+						console.log("Container says (text):", event.data);
+					}
 				};
 			}
 
