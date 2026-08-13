@@ -55,7 +55,6 @@ const Terminal = ({ onInput, outputEvent }) => {
 		term.onData((data) => {
 			if (!onInputRef.current) return;
 			if (data === "\r") {
-				term.write("\r\n");
 				onInputRef.current("\r\n");
 				return;
 			}

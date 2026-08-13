@@ -92,7 +92,9 @@ int run_container(void *arg) {
 	// execl("/usr/bin/stdbuf", "stdbuf", "-i0", "-o0", "-e0", "/bin/sh", NULL);
 	// execl("/bin/sh", "sh", "-i", NULL);
 
-	execl("/bin/sh", "sh", NULL);
+	setenv("TERM", "xterm-256color", 1);
+
+	execl("/bin/bash", "bash", "-i", NULL);
 
 	printc(ERR, "container - run_container", "Container finished running!\n");
 	perror("execl");
