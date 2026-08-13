@@ -3,11 +3,66 @@ const WebSocket = require("ws");
 const SESSION_IDLE_MS = Number(
 	process.env.TERMINAL_SESSION_IDLE_MS || 10 * 60 * 1000,
 );
+const TESTING_GATEWAY_PORTS = Array.from(
+	{ length: 11 },
+	(_, index) => 3000 + index,
+);
 
 const sessions = new Map();
 
 const toSessionId = ({ studentId, contestId, problemId }) =>
 	`${studentId}:${contestId}:${problemId}`;
+
+const isTestingMode = () =>
+	process.env.MODE === "testing" || process.env.NODE_ENV === "testing";
+
+const getGatewayCandidates = (gatewayUrl) => {
+	const baseUrl = new URL(gatewayUrl);
+
+	if (!isTestingMode()) {
+		return [baseUrl.toString()];
+	}
+
+	return TESTING_GATEWAY_PORTS.map((port) => {
+		const candidate = new URL(baseUrl.toString());
+		candidate.port = String(port);
+		return candidate.toString();
+	});
+};
+
+const connectWebSocket = (gatewayUrl, timeoutMs = 4000) =>
+	new Promise((resolve, reject) => {
+		const ws = new WebSocket(gatewayUrl);
+		let settled = false;
+
+		const finish = (fn, value) => {
+			if (settled) return;
+			console.log("finish called");
+			settled = true;
+			clearTimeout(timeout);
+			fn(value);
+		};
+
+		const timeout = setTimeout(() => {
+			console.log("url timed out: ", gatewayUrl);
+			try {
+				ws.terminate();
+			} catch (err) {}
+			finish(
+				reject,
+				new Error(`Timed out while connecting to ${gatewayUrl}.`),
+			);
+		}, timeoutMs);
+
+		ws.once("open", () => finish(resolve, ws));
+		ws.once("error", (err) => {
+			console.log("url errored: ", gatewayUrl, err);
+			try {
+				ws.terminate();
+			} catch (closeErr) {}
+			finish(reject, err);
+		});
+	});
 
 const buildFilesFrame = (files) => {
 	const normalizedFiles = Array.isArray(files) ? files : [];
@@ -86,18 +141,47 @@ const createSession = async ({ sessionId, gatewayUrl }) => {
 
 	if (existing && existing.ws.readyState === WebSocket.OPEN) {
 		existing.lastActivity = Date.now();
+		console.log("ws not open");
 		return existing;
 	}
 
 	if (existing && existing.ws.readyState === WebSocket.CONNECTING) {
+		console.log("ws connecting");
 		return existing;
 	}
 
-	const ws = new WebSocket(gatewayUrl);
+	const candidates = getGatewayCandidates(gatewayUrl);
+	let connectedWs = null;
+	let connectedUrl = null;
+	let lastError = null;
+
+	for (const candidateUrl of candidates) {
+		console.log("ws candidate:", candidateUrl);
+		try {
+			connectedWs = await connectWebSocket(candidateUrl);
+			connectedUrl = candidateUrl;
+			break;
+		} catch (err) {
+			lastError = err;
+		}
+	}
+
+	if (!connectedWs) {
+		const errorMessage = isTestingMode()
+			? `Unable to connect to gateway websocket on ports 3000-3010. Last error: ${lastError?.message || "unknown"}`
+			: `Unable to connect to gateway websocket at ${gatewayUrl}. Last error: ${lastError?.message || "unknown"}`;
+		console.log(
+			`Unable to connect to gateway websocket on ports 3000-3010. Last error: ${lastError?.message || "unknown"}`,
+		);
+		throw new Error(errorMessage);
+	}
+
+	console.log(`found gateway at: ${connectedUrl}`);
 
 	const session = {
 		id: sessionId,
-		ws,
+		ws: connectedWs,
+		gatewayUrl: connectedUrl,
 		filesSent: false,
 		sseClients: new Set(existing?.sseClients || []),
 		lastActivity: Date.now(),
@@ -105,12 +189,16 @@ const createSession = async ({ sessionId, gatewayUrl }) => {
 
 	sessions.set(sessionId, session);
 
-	ws.on("open", () => {
+	connectedWs.on("open", () => {
+		console.log("ws open");
 		session.lastActivity = Date.now();
-		emitSystem(sessionId, "Gateway connection established.");
+		emitSystem(
+			sessionId,
+			`Gateway connection established: ${connectedUrl}.`,
+		);
 	});
 
-	ws.on("message", (msg) => {
+	connectedWs.on("message", (msg) => {
 		session.lastActivity = Date.now();
 		const payload = Buffer.isBuffer(msg)
 			? msg.toString("utf8")
@@ -123,35 +211,20 @@ const createSession = async ({ sessionId, gatewayUrl }) => {
 		});
 	});
 
-	ws.on("close", () => {
+	connectedWs.on("close", () => {
 		emitSystem(sessionId, "Gateway connection closed.");
 		session.filesSent = false;
 	});
 
-	ws.on("error", (err) => {
+	connectedWs.on("error", (err) => {
 		emitSystem(sessionId, `Gateway error: ${err.message}`);
 	});
 
-	return new Promise((resolve, reject) => {
-		const timeout = setTimeout(() => {
-			reject(
-				new Error("Timed out while connecting to gateway websocket."),
-			);
-		}, 8000);
-
-		ws.once("open", () => {
-			clearTimeout(timeout);
-			resolve(session);
-		});
-
-		ws.once("error", (err) => {
-			clearTimeout(timeout);
-			reject(err);
-		});
-	});
+	return session;
 };
 
 const initTerminal = async ({ sessionId, gatewayUrl, files }) => {
+	console.log("initing...");
 	const session = await createSession({ sessionId, gatewayUrl });
 
 	if (!session.filesSent) {
