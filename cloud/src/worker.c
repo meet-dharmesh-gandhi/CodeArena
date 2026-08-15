@@ -282,6 +282,7 @@ void handle_container(struct socketDetails *sd) {
 				changed = 1;
 				printc(INFO, "worker - handle_container", "Task %d\n", i);
 				struct TaskDetail *t = &taskList[i];
+				t->lastConnected = getCurrTime();
 				int required = t->top_filled - t->top_buf_ptr;
 				int sent =
 					write(t->bottom_fd, t->top_buf + t->top_buf_ptr, required);
@@ -392,6 +393,8 @@ void handle_container(struct socketDetails *sd) {
 				ib->buf_ptr += recved;
 			}
 
+			printc(INFO, "worker - handle_container", "Container fd: %d\n",
+				   sd->fd);
 			int taskID = getContainerTaskID(sd->fd);
 
 			if (taskID == -1) {
@@ -405,6 +408,7 @@ void handle_container(struct socketDetails *sd) {
 
 			ib->filled = ib->buf_ptr;
 			struct TaskDetail *t = &taskList[taskID];
+			t->lastConnected = getCurrTime();
 
 			iop->packet_ID = PACKET_ID;
 			iop->packet_type = htonl(IO_PACKET);
@@ -493,6 +497,7 @@ void handle_assigner_fd(struct socketDetails *sd) {
 				taskList[i].bottom_buf_ptr != -1) {
 				changed = 1;
 				struct TaskDetail *t = &taskList[i];
+				t->lastConnected = getCurrTime();
 				int required = t->bottom_filled - t->bottom_buf_ptr;
 				int sent = send(t->top_fd, t->bottom_buf + t->bottom_buf_ptr,
 								required, 0);
@@ -616,6 +621,7 @@ void handle_assigner_fd(struct socketDetails *sd) {
 					printc(INFO, "worker - handle_assigner_fd",
 						   "IO Packet, task: %d\n", iop->task_ID);
 					struct TaskDetail *t = &taskList[iop->task_ID];
+					t->lastConnected = getCurrTime();
 					int sent =
 						write(t->bottom_fd, iop->data,
 							  ib->filled - (iop_size - MAX_DATA_CAPACITY));
@@ -723,6 +729,9 @@ void handle_task_fd(struct socketDetails *sd) {
 
 				// create a new container
 				createContainer(&taskList[tp->taskID]);
+
+				printc(INFO, "worker - handle_task_fd",
+					   "container creation done for: %d", tp->taskID);
 			}
 		} else if (res != 2) {
 			break;
@@ -741,6 +750,14 @@ int getContainerTaskID(int fd) {
 	for (int i = 0; i < taskListLength; i++) {
 		if (taskList[i].filled == 1 && taskList[i].bottom_fd == fd) {
 			return i;
+		}
+		if (taskList[i].bottom_fd == fd) {
+			printc(INFO, "worker - getContainerTaskID",
+				   "found fd but not filled: %d, ind: %d\n", fd, i);
+		}
+		if (taskList[i].filled == 1) {
+			printc(INFO, "worker - getContainerTaskID",
+				   "found filled but not filled: %d\n", i);
 		}
 	}
 
@@ -851,6 +868,7 @@ void createContainer(struct TaskDetail *t) {
 
 	t->bottom_fd = master_fd;
 	t->bottom_sd->fd = master_fd;
+	printc(INFO, "worker - createContainer", "container fd: %d\n", master_fd);
 	setNonBlocking(t->bottom_fd);
 	addFDToEpoll(master_fd, EPOLL_OUT | EPOLLIN | EPOLL_DESTROY, t->bottom_sd);
 
@@ -875,14 +893,13 @@ void writeToPath(char *map_buf, int pid, char *path) {
 	fclose(f);
 }
 
-// TODO make cleanup more robust, currently lastConnected is checked but never
-// set
 void cleanUpTasks() {
 	int currTime = getCurrTime();
 
 	for (int i = 0; i < taskListLength; i++) {
 		if (taskList[i].filled == 1 && taskList[i].lastConnected > 0 &&
-			currTime - taskList[i].lastConnected > EXPIRE_PERIOD) {
+			currTime - taskList[i].lastConnected > TASK_EXPIRE_PERIOD) {
+			printc(IMP, "worker - cleanUpTasks", "Cleaning up task %d\n", i);
 			taskList[i].filled = 0;
 		}
 	}
