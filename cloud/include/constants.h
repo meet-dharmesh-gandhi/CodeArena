@@ -61,13 +61,14 @@ enum NodeTypes {
 #define MAX_EVENTS                                                             \
 	6 // accounts for EPOLLIN, EPOLLOUT, EPOLLRDHUP, EPOLLHUP, EPOLLET, EPOLLERR
 
-#define GATEWAY_VIP "10.20.14.108"
+#define GATEWAY_VIP "10.20.14.124"
 
 #define MAX_FILE_SIZE 100000 // in bytes
 #define MAX_FILES 30
 #define MAX_FILENAME_SIZE 256 // in bytes
 
 #define EXPIRE_PERIOD (HEARTBEAT_INTERVAL * MAX_MISSES)
+#define TASK_EXPIRE_PERIOD 600000 // 10 minutes (600,000 milliseconds)
 #define SOCKET_TIMEOUT 100
 #define MAX_PACKET_RETRIES 3
 

@@ -3,7 +3,7 @@ import { Terminal as XTerm } from "xterm";
 import { FitAddon } from "xterm-addon-fit";
 import "xterm/css/xterm.css";
 
-const Terminal = ({ onInput, outputEvent }) => {
+const Terminal = ({ onInput, outputEvent, setOutputEvent }) => {
 	const terminalRef = useRef(null);
 	const xtermRef = useRef(null);
 	const fitAddonRef = useRef(null);
@@ -17,6 +17,7 @@ const Terminal = ({ onInput, outputEvent }) => {
 		if (!terminalRef.current) return;
 
 		const term = new XTerm({
+			convertEol: true,
 			cursorBlink: true,
 			theme: {
 				background: "#050505",
@@ -54,10 +55,7 @@ const Terminal = ({ onInput, outputEvent }) => {
 
 		term.onData((data) => {
 			if (!onInputRef.current) return;
-			if (data === "\r") {
-				onInputRef.current("\r\n");
-				return;
-			}
+			// console.log("data: ", JSON.stringify(data));
 			onInputRef.current(data);
 		});
 
@@ -76,22 +74,29 @@ const Terminal = ({ onInput, outputEvent }) => {
 	}, []);
 
 	useEffect(() => {
-		if (!outputEvent || !xtermRef.current) return;
-
+		// console.log("outputEvent changed", outputEvent.length);
 		const term = xtermRef.current;
-		if (outputEvent.type === "output" && outputEvent.payload) {
-			term.write(String(outputEvent.payload));
-			return;
+
+		if (outputEvent.length == 0 || !xtermRef.current) return;
+
+		// console.log("useEffect", outputEvent);
+
+		for (let i = 0; i < outputEvent.length; i++) {
+			// console.log(outputEvent[i].type, outputEvent[i]);
+			if (outputEvent[i].type === "output" && outputEvent[i].payload) {
+				term.write(outputEvent[i].payload);
+			}
+
+			if (outputEvent[i].type === "error" && outputEvent[i].payload) {
+				term.writeln(`\x1b[31m${outputEvent[i].payload}\x1b[0m`);
+			}
+
+			if (outputEvent[i].type === "system" && outputEvent[i].payload) {
+				term.writeln(`\x1b[33m${outputEvent[i].payload}\x1b[0m`);
+			}
 		}
 
-		if (outputEvent.type === "error" && outputEvent.payload) {
-			term.writeln(`\x1b[31m${outputEvent.payload}\x1b[0m`);
-			return;
-		}
-
-		if (outputEvent.type === "system" && outputEvent.payload) {
-			term.writeln(`\x1b[33m${outputEvent.payload}\x1b[0m`);
-		}
+		setOutputEvent((val) => val.slice(outputEvent.length));
 	}, [outputEvent]);
 
 	return (

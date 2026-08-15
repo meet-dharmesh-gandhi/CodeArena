@@ -11,7 +11,8 @@ const TESTING_GATEWAY_PORTS = Array.from(
 const sessions = new Map();
 
 const toSessionId = ({ studentId, contestId, problemId }) =>
-	`${studentId}:${contestId}:${problemId}`;
+	// Date.now is needed to ensure multiple submissions allow the terminal to run
+	`${studentId}:${contestId}:${problemId}:${Date.now()}`;
 
 const isTestingMode = () =>
 	process.env.MODE === "testing" || process.env.NODE_ENV === "testing";
@@ -118,6 +119,7 @@ const broadcast = (sessionId, event) => {
 	if (!session) return;
 
 	const payload = `data: ${JSON.stringify(event)}\n\n`;
+	console.log("payload:", payload);
 	for (const res of session.sseClients) {
 		try {
 			res.write(payload);

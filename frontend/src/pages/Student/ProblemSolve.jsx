@@ -72,7 +72,7 @@ const ProblemSolve = () => {
 	const [mainFile, setMainFile] = useState(""); // File to execute
 	const [activeTab, setActiveTab] = useState("testcases");
 	const [editorTab, setEditorTab] = useState("code"); // 'code', 'input', 'output', 'terminal'
-	const [terminalOutputEvent, setTerminalOutputEvent] = useState(null);
+	const [terminalOutputEvent, setTerminalOutputEvent] = useState([]);
 	const [customInput, setCustomInput] = useState("");
 	const [outputData, setOutputData] = useState("");
 	const [submitting, setSubmitting] = useState(false);
@@ -215,11 +215,20 @@ const ProblemSolve = () => {
 	};
 
 	const pushTerminalEvent = (type, payload) => {
-		setTerminalOutputEvent({
-			id: `${Date.now()}-${Math.random()}`,
-			type,
-			payload,
-			timestamp: Date.now(),
+		// console.log("terminalOutputEvent:", terminalOutputEvent, type, payload);
+		setTerminalOutputEvent((val) => {
+			// console.log("val:", val);
+			const newOutput = [
+				...val,
+				{
+					id: `${Date.now()}-${Math.random()}`,
+					type,
+					payload,
+					timestamp: Date.now(),
+				},
+			];
+			// console.log("newTerminalOutputEvent", newOutput);
+			return newOutput;
 		});
 	};
 
@@ -602,11 +611,13 @@ const ProblemSolve = () => {
 				es.onmessage = (event) => {
 					try {
 						const payload = JSON.parse(event.data);
+						// console.log("payload: ", JSON.stringify(payload));
 						pushTerminalEvent(
 							payload.type || "output",
 							payload.payload || "",
 						);
 					} catch (e) {
+						// console.log(JSON.stringify(event.data));
 						pushTerminalEvent("output", event.data || "");
 					}
 				};
@@ -655,6 +666,7 @@ const ProblemSolve = () => {
 		terminalInputQueueRef.current = terminalInputQueueRef.current
 			.then(async () => {
 				const sessionId = await ensureTerminalSession();
+				// console.log("session id: ", sessionId, !!sessionId);
 				if (!sessionId) return;
 
 				const res = await fetch(`${API_BASE}/api/terminal/input`, {
@@ -669,6 +681,8 @@ const ProblemSolve = () => {
 						data.message || "Failed to forward terminal input.",
 					);
 				}
+
+				// console.log("forwarded: ", input);
 			})
 			.catch((e) => {
 				pushTerminalEvent(
@@ -1174,6 +1188,7 @@ const ProblemSolve = () => {
 									<Terminal
 										onInput={handleTerminalInput}
 										outputEvent={terminalOutputEvent}
+										setOutputEvent={setTerminalOutputEvent}
 									/>
 								) : editorTab === "input" ? (
 									<textarea
