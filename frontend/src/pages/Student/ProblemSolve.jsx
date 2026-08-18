@@ -1174,7 +1174,7 @@ const ProblemSolve = () => {
 										options={{
 											fontSize: 14,
 											minimap: { enabled: false },
-											scrollBeyondLastLine: false,
+											scrollBeyondLastLine: true,
 											automaticLayout: true,
 											padding: { top: 20 },
 											fontFamily:
