@@ -9,5 +9,6 @@
 
 **/.venv/**
 *.tar.*
-*logs*.txt
+**/*logs*.txt
+*.xlsx
 **/.vscode/**

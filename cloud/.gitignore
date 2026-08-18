@@ -7,6 +7,7 @@
 **ignore**/
 **.ignore**
 *.env
+logs*.txt
 
 **/node_modules
 /node/**
