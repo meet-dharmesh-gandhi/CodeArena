@@ -31,15 +31,21 @@ const int addrLen = sizeof(struct sockaddr_in);
 int roleChanged = 0;
 
 int task_fd, find_fd, hb_fd, role_fd, discover_fd, gateway_fd, timer_fd,
-	accept_worker_fd;
+	accept_worker_fd, gateway_ide_fd, accept_ide_worker_fd;
 
 int uds[2];
 
 struct socketDetails *task_fd_sd, *find_fd_sd, *hb_fd_sd, *role_fd_sd,
-	*gateway_fd_sd, *timer_fd_sd, *accept_worker_fd_sd, *exit_fd_sd;
+	*gateway_fd_sd, *timer_fd_sd, *accept_worker_fd_sd, *exit_fd_sd,
+	*accept_ide_worker_fd_sd, *gateway_ide_fd_sd;
 
 uint8_t *fd_buf;
 const int fdBufSize = sizeof(uint8_t) * LARGEST_PACKET;
+
+struct TaskDetail *ideTaskList;
+
+struct ide_packet *idep;
+const int idep_size = sizeof(struct ide_packet);
 
 struct generic_packet *gp;
 const int gp_size = sizeof(struct generic_packet);
@@ -99,9 +105,12 @@ void handle_exit_fd(struct socketDetails *sd);
 void handle_role_fd(struct socketDetails *sd);
 void handle_timer_fd(struct socketDetails *sd);
 void handle_accept_worker_fd(struct socketDetails *sd);
+void handle_accept_ide_worker_fd(struct socketDetails *sd);
 void handle_hb_fd(struct socketDetails *sd);
 void handle_gateway_fd(struct socketDetails *sd);
+void handle_ide_gateway_fd(struct socketDetails *sd);
 void handle_worker_fd(struct socketDetails *sd);
+void handle_ide_worker_fd(struct socketDetails *sd);
 void handle_find_fd(struct socketDetails *sd);
 void handle_task_fd(struct socketDetails *sd);
 
@@ -129,6 +138,14 @@ int main(int argc, char const *argv[]) {
 	memset(intermediateBufferList, 0, intermediateBufferListSize);
 	expectedConnectionsList = amalloc(&arena, expectedConnectionsListSize);
 	memset(expectedConnectionsList, 0, expectedConnectionsListSize);
+	ideTaskList = amalloc(&arena, taskListSize);
+	memset(ideTaskList, 0, taskListSize);
+	for (int i = 0; i < taskListLength; i++) {
+		ideTaskList[i].bottom_buf_ptr = -1;
+		ideTaskList[i].top_buf_ptr = -1;
+		ideTaskList[i].bottom_sd = NULL;
+		ideTaskList[i].top_sd = NULL;
+	}
 
 	fd_buf = amalloc(&arena, fdBufSize);
 
@@ -166,8 +183,11 @@ int main(int argc, char const *argv[]) {
 
 	gateway_fd = socket(AF_INET, SOCK_STREAM, 0);
 	setNonBlocking(gateway_fd);
+	gateway_ide_fd = socket(AF_INET, SOCK_STREAM, 0);
+	setNonBlocking(gateway_ide_fd);
 	// getNewSocket(ASSIGNER_GATEWAY_TASK_PORT, SOCKET_TIMEOUT, SOCK_STREAM);
 	accept_worker_fd = getNewSocket(TASK_PORT, SOCKET_TIMEOUT, SOCK_STREAM);
+	accept_ide_worker_fd = getNewSocket(IDE_PORT, SOCKET_TIMEOUT, SOCK_STREAM);
 
 	// create uds
 	if (socketpair(AF_UNIX, SOCK_STREAM, 0, uds) == -1) {
@@ -198,6 +218,7 @@ int main(int argc, char const *argv[]) {
 	hb = amalloc(&arena, hb_size);
 	fmp = amalloc(&arena, fmp_size);
 	dp = amalloc(&arena, dp_size);
+	idep = amalloc(&arena, idep_size);
 
 	task_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
 	task_fd_sd->fd = task_fd;
@@ -229,6 +250,12 @@ int main(int argc, char const *argv[]) {
 	gateway_fd_sd->data = NULL;
 	gateway_fd_sd->events = 0;
 
+	gateway_ide_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
+	gateway_ide_fd_sd->fd = gateway_ide_fd;
+	gateway_ide_fd_sd->handler = &handle_ide_gateway_fd;
+	gateway_ide_fd_sd->data = NULL;
+	gateway_ide_fd_sd->events = 0;
+
 	accept_worker_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
 	accept_worker_fd_sd->fd = accept_worker_fd;
 	accept_worker_fd_sd->handler = &handle_accept_worker_fd;
@@ -247,10 +274,17 @@ int main(int argc, char const *argv[]) {
 	exit_fd_sd->data = NULL;
 	exit_fd_sd->events = 0;
 
+	accept_ide_worker_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
+	accept_ide_worker_fd_sd->fd = accept_ide_worker_fd;
+	accept_ide_worker_fd_sd->handler = &handle_accept_ide_worker_fd;
+	accept_ide_worker_fd_sd->data = NULL;
+	accept_ide_worker_fd_sd->events = 0;
+
 	printc(INFO, "assigner - main", "starting event loop\n");
 
-	startLoop(MAX_EVENTS, 7, task_fd_sd, find_fd_sd, hb_fd_sd, role_fd_sd,
-			  accept_worker_fd_sd, timer_fd_sd, exit_fd_sd);
+	startLoop(MAX_EVENTS, 8, task_fd_sd, find_fd_sd, hb_fd_sd, role_fd_sd,
+			  accept_worker_fd_sd, timer_fd_sd, exit_fd_sd,
+			  accept_ide_worker_fd_sd);
 
 	printc(INFO, "assigner - main", "stopping event loop\n");
 
@@ -912,6 +946,232 @@ void handle_task_fd(struct socketDetails *sd) {
 	}
 }
 
+void handle_accept_ide_worker_fd(struct socketDetails *sd) {
+	if (sd->events & EPOLLOUT) {
+		drainSocket(sd->fd, SOCK_STREAM);
+		modifyFDInEpoll(sd->fd, EPOLL_IN, sd);
+	}
+
+	if (sd->events & EPOLLIN) {
+		while (1) {
+			int addrLength = addrLen;
+			int res = accept(sd->fd, addr, &addrLength);
+
+			if (res < 0) {
+				if (errno == EAGAIN || errno == EWOULDBLOCK) {
+					break;
+				} else {
+					continue;
+				}
+			} else {
+				if (roleChanged == 1) {
+					close(res);
+				}
+
+				int ind = -1;
+				for (int i = 0; i < taskListLength; i++) {
+					if (ideTaskList[i].filled == 1 &&
+						ideTaskList[i].bottom_fd == -1) {
+						ind = i;
+						ideTaskList[i].bottom_fd = res;
+						setNonBlocking(ideTaskList[i].bottom_fd);
+						if (ideTaskList[i].bottom_sd == NULL) {
+							ideTaskList[i].bottom_sd =
+								amalloc(&arena, sizeof(struct socketDetails));
+						}
+						ideTaskList[i].bottom_sd->data = getNodeIB(res);
+						ideTaskList[i].bottom_sd->fd = res;
+						ideTaskList[i].bottom_sd->handler =
+							&handle_ide_worker_fd;
+						ideTaskList[i].bottom_sd->events = 0;
+						break;
+					}
+				}
+				if (ind != -1) {
+					addFDToEpoll(res, EPOLL_IN | EPOLLOUT | EPOLL_DESTROY,
+								 ideTaskList[ind].bottom_sd);
+				} else {
+					close(res);
+				}
+			}
+		}
+	}
+}
+
+void handle_ide_gateway_fd(struct socketDetails *sd) {
+	int events = sd->events;
+	struct IntermediateBuffer *ib = (struct IntermediateBuffer *)sd->data;
+
+	if (events & EPOLLOUT) {
+		int hasStarted = 1;
+		for (int i = 0; i < taskListLength; i++) {
+			if (ideTaskList[i].filled == 1 &&
+				ideTaskList[i].bottom_buf_ptr != -1) {
+				hasStarted = 0;
+				struct TaskDetail *t = &ideTaskList[i];
+				int required = t->bottom_filled - t->bottom_buf_ptr;
+				int sent = send(sd->fd, t->bottom_buf + t->bottom_buf_ptr,
+								required, 0);
+
+				if (sent < required) {
+					t->bottom_buf_ptr += max(sent, 0);
+					return;
+				}
+				t->bottom_buf_ptr = 0;
+
+				struct IntermediateBuffer *wIb = getNodeIB(t->bottom_fd);
+				while (1) {
+					int done = getPacketData(sd->fd, wIb->buf, &wIb->buf_ptr,
+											 (uint8_t *)idep, idep_size);
+					if (done == YES) {
+						int sent2 = send(sd->fd, idep, idep_size, 0);
+						if (sent2 < idep_size) {
+							memcpy(t->bottom_buf, idep, idep_size);
+							t->bottom_buf_ptr = max(sent2, 0);
+							t->bottom_filled = idep_size;
+							return;
+						}
+					} else if (done == ERROR || done == UNKNOWN) {
+						break;
+					}
+				}
+			}
+		}
+
+		if (hasStarted == 0) {
+			modifyFDInEpoll(sd->fd, EPOLL_IN | EPOLLOUT | EPOLL_DESTROY, sd);
+		}
+	}
+
+	if (events & EPOLL_DESTROY) {
+		for (int i = 0; i < taskListLength; i++) {
+			ideTaskList[i].filled = 0;
+		}
+		ib->taken = 0;
+		ib->buf_ptr = 0;
+	}
+
+	if (events & EPOLLIN) {
+		while (1) {
+			int done = getPacketData(sd->fd, ib->buf, &ib->buf_ptr,
+									 (uint8_t *)idep, idep_size);
+			if (done == YES) {
+				struct TaskDetail *t = NULL;
+				for (int i = 0; i < taskListLength; i++) {
+					if (ideTaskList[i].filled == 1) {
+						t = &ideTaskList[i];
+						break;
+					}
+				}
+
+				if (t == NULL)
+					continue;
+
+				int sent = send(t->bottom_fd, idep, idep_size, 0);
+				if (sent < idep_size) {
+					memcpy(t->top_buf, idep, idep_size);
+					t->top_buf_ptr = max(sent, 0);
+					t->top_filled = idep_size;
+					modifyFDInEpoll(sd->fd, EPOLL_OUT | EPOLL_DESTROY, sd);
+					break;
+				}
+			} else if (done == ERROR || done == UNKNOWN) {
+				break;
+			}
+		}
+	}
+}
+
+void handle_ide_worker_fd(struct socketDetails *sd) {
+	int events = sd->events;
+	struct IntermediateBuffer *ib = (struct IntermediateBuffer *)sd->data;
+
+	if (events & EPOLLOUT) {
+		int changed = 0;
+		for (int i = 0; i < taskListLength; i++) {
+			if (ideTaskList[i].filled == 1 &&
+				ideTaskList[i].bottom_fd == sd->fd &&
+				ideTaskList[i].top_buf_ptr != -1) {
+				changed = 1;
+				int required = ib->filled - ib->buf_ptr;
+				int sent =
+					send(gateway_ide_fd, ib->buf + ib->buf_ptr, required, 0);
+
+				if (sent < required) {
+					ib->buf_ptr += max(sent, 0);
+					return;
+				}
+				ib->buf_ptr = 0;
+
+				struct IntermediateBuffer *gIb =
+					getNodeIB(ideTaskList[i].top_fd);
+				struct TaskDetail *t = &ideTaskList[i];
+				while (1) {
+					int done = getPacketData(sd->fd, gIb->buf, &gIb->buf_ptr,
+											 (uint8_t *)idep, idep_size);
+					if (done == YES) {
+						int sent2 = send(t->bottom_fd, idep, idep_size, 0);
+						if (sent2 < idep_size) {
+							memcpy(t->top_buf, idep, idep_size);
+							t->top_buf_ptr = max(sent2, 0);
+							t->top_filled = idep_size;
+							return;
+						} else {
+							t->top_buf_ptr = -1;
+						}
+					} else if (done == ERROR || done == UNKNOWN) {
+						break;
+					}
+				}
+			}
+		}
+		if (changed == 1) {
+			modifyFDInEpoll(sd->fd, EPOLL_IN | EPOLLOUT | EPOLL_DESTROY, sd);
+		}
+	}
+
+	if (events & EPOLL_DESTROY) {
+		for (int i = 0; i < taskListLength; i++) {
+			if (ideTaskList[i].filled == 1 &&
+				ideTaskList[i].bottom_fd == sd->fd) {
+				ideTaskList[i].filled = 0;
+			}
+		}
+		ib->taken = 0;
+		ib->buf_ptr = 0;
+	}
+
+	if (events & EPOLLIN) {
+		while (1) {
+			int done = getPacketData(sd->fd, ib->buf, &ib->buf_ptr,
+									 (uint8_t *)idep, idep_size);
+			if (done == YES) {
+				struct TaskDetail *t = NULL;
+				for (int i = 0; i < taskListLength; i++) {
+					if (ideTaskList[i].filled == 1 &&
+						ideTaskList[i].bottom_fd == sd->fd) {
+						t = &ideTaskList[i];
+						break;
+					}
+				}
+				if (t == NULL)
+					continue;
+
+				int sent = send(gateway_ide_fd, idep, idep_size, 0);
+				if (sent < idep_size) {
+					memcpy(t->bottom_buf, idep, idep_size);
+					t->bottom_buf_ptr = max(sent, 0);
+					t->bottom_filled = idep_size;
+					modifyFDInEpoll(sd->fd, EPOLL_OUT | EPOLL_DESTROY, sd);
+					break;
+				}
+			} else if (done == ERROR || done == UNKNOWN) {
+				break;
+			}
+		}
+	}
+}
+
 // -------------------- UTILS --------------------
 
 struct IntermediateBuffer *getNodeIB(int fd) {
@@ -1142,6 +1402,16 @@ int processTaskPacket() {
 		requestTCPConnection(gateway_fd, addr, gateway_fd_sd);
 	}
 
+	if (tcpConnectionExists(gateway_ide_fd) == NO) {
+		if (gateway_ide_fd_sd->data == NULL) {
+			gateway_ide_fd_sd->data = getNodeIB(gateway_ide_fd);
+		}
+		in_port_t old_port = addr->sin_port;
+		addr->sin_port = htons(atoi(IDE_PORT));
+		requestTCPConnection(gateway_ide_fd, addr, gateway_ide_fd_sd);
+		addr->sin_port = old_port;
+	}
+
 	// add to task list
 	addToTaskList(gateway_fd, tp->taskID, addr);
 }
@@ -1283,7 +1553,7 @@ int removeTask(int taskID) {
  * Adds the task to the task list
  */
 int addToTaskList(int fd, int taskID, struct sockaddr_in *given_addr) {
-	if (fd < 0) {
+	if (fd < 0 || taskID < 0 || taskID >= taskListLength) {
 		return EXIT_FAILURE;
 	}
 
@@ -1291,33 +1561,50 @@ int addToTaskList(int fd, int taskID, struct sockaddr_in *given_addr) {
 		given_addr = addr;
 	}
 
-	for (int i = 0; i < taskListLength; i++) {
-		if (taskList[i].filled == 0) {
-			taskList[i].filled = 1;
-			taskList[i].top_fd = fd;
-			taskList[i].bottom_fd = -1;
-			taskList[i].top_buf_ptr = -1;
-			taskList[i].bottom_buf_ptr = -1;
-			taskList[i].lastConnected = getCurrTime();
-
-			taskList[i].top_sd = amalloc(&arena, sizeof(struct socketDetails));
-			taskList[i].top_sd->data = getNodeIB(fd);
-			taskList[i].top_sd->fd = fd;
-			taskList[i].top_sd->handler = &handle_gateway_fd;
-			taskList[i].top_sd->events = 0;
-
-			taskList[i].bottom_sd =
-				amalloc(&arena, sizeof(struct socketDetails));
-			taskList[i].bottom_sd->data = NULL;
-			taskList[i].bottom_sd->fd = -1;
-			taskList[i].bottom_sd->handler = &handle_worker_fd;
-			taskList[i].bottom_sd->events = 0;
-
-			return EXIT_SUCCESS;
-		}
+	if (taskList[taskID].filled == 1) {
+		return EXIT_FAILURE;
 	}
 
-	return EXIT_FAILURE;
+	taskList[taskID].filled = 1;
+	taskList[taskID].top_fd = fd;
+	taskList[taskID].bottom_fd = -1;
+	taskList[taskID].top_buf_ptr = -1;
+	taskList[taskID].bottom_buf_ptr = -1;
+	taskList[taskID].lastConnected = getCurrTime();
+
+	taskList[taskID].top_sd = amalloc(&arena, sizeof(struct socketDetails));
+	taskList[taskID].top_sd->data = getNodeIB(fd);
+	taskList[taskID].top_sd->fd = fd;
+	taskList[taskID].top_sd->handler = &handle_gateway_fd;
+	taskList[taskID].top_sd->events = 0;
+
+	taskList[taskID].bottom_sd = amalloc(&arena, sizeof(struct socketDetails));
+	taskList[taskID].bottom_sd->data = NULL;
+	taskList[taskID].bottom_sd->fd = -1;
+	taskList[taskID].bottom_sd->handler = &handle_worker_fd;
+	taskList[taskID].bottom_sd->events = 0;
+
+	ideTaskList[taskID].filled = 1;
+	ideTaskList[taskID].top_fd = gateway_ide_fd;
+	ideTaskList[taskID].bottom_fd = -1;
+	ideTaskList[taskID].top_buf_ptr = -1;
+	ideTaskList[taskID].bottom_buf_ptr = -1;
+	ideTaskList[taskID].lastConnected = getCurrTime();
+
+	ideTaskList[taskID].top_sd = amalloc(&arena, sizeof(struct socketDetails));
+	ideTaskList[taskID].top_sd->data = getNodeIB(gateway_ide_fd);
+	ideTaskList[taskID].top_sd->fd = gateway_ide_fd;
+	ideTaskList[taskID].top_sd->handler = &handle_ide_gateway_fd;
+	ideTaskList[taskID].top_sd->events = 0;
+
+	ideTaskList[taskID].bottom_sd =
+		amalloc(&arena, sizeof(struct socketDetails));
+	ideTaskList[taskID].bottom_sd->data = NULL;
+	ideTaskList[taskID].bottom_sd->fd = -1;
+	ideTaskList[taskID].bottom_sd->handler = &handle_ide_worker_fd;
+	ideTaskList[taskID].bottom_sd->events = 0;
+
+	return EXIT_SUCCESS;
 }
 
 /**
