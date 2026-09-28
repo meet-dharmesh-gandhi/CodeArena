@@ -6,6 +6,7 @@ int UID;
 Arena arena;
 
 struct TaskDetail *taskList;
+struct TaskDetail *ideTaskList;
 const int taskListLength = WORKER_CAPACITY;
 const int taskListSize = sizeof(struct TaskDetail) * WORKER_CAPACITY;
 struct IntermediateBuffer *intermediateBufferList;
@@ -20,7 +21,7 @@ const int expectedConnectionsListSize =
 uint8_t *fd_buf;
 const int fdBuf_size = sizeof(uint8_t) * LARGEST_PACKET;
 
-int task_fd, discover_fd, hb_fd, assigner_fd, role_fd, timer_fd;
+int task_fd, discover_fd, hb_fd, assigner_fd, role_fd, timer_fd, ide_fd;
 
 int uds[2];
 
@@ -49,11 +50,13 @@ struct heartbeat_packet *hb;
 const int hb_size = sizeof(struct heartbeat_packet);
 struct io_packet *iop;
 const int iop_size = sizeof(struct io_packet);
+struct ide_packet *idep;
+const int idep_size = sizeof(struct ide_packet);
 struct task_over_packet *taop;
 const int taop_size = sizeof(struct task_over_packet);
 
 struct socketDetails *task_fd_sd, *hb_fd_sd, *assigner_fd_sd, *role_fd_sd,
-	*timer_fd_sd, *exit_fd_sd;
+	*timer_fd_sd, *exit_fd_sd, *ide_fd_sd;
 
 extern int run_container(void *arg);
 
@@ -62,7 +65,7 @@ int getContainerTaskID(int fd);
 struct IntermediateBuffer *getNodeIB(int fd);
 struct IntermediateBuffer *getIB();
 void sendTaskOverPacket(int fd);
-void createContainer(struct TaskDetail *t);
+void createContainer(struct TaskDetail *t, int taskID);
 void writeToPath(char *map_buf, int pid, char *path);
 void cleanUpTasks();
 void sendHeartbeat();
@@ -85,6 +88,7 @@ void handle_container(struct socketDetails *sd);
 void handle_timer_fd(struct socketDetails *sd);
 void handle_role_fd(struct socketDetails *sd);
 void handle_assigner_fd(struct socketDetails *sd);
+void handle_ide_assigner_fd(struct socketDetails *sd);
 void handle_hb_fd(struct socketDetails *sd);
 void handle_task_fd(struct socketDetails *sd);
 
@@ -107,6 +111,14 @@ int main(int argc, char const *argv[]) {
 		taskList[i].top_buf_ptr = -1;
 		taskList[i].bottom_sd = NULL;
 		taskList[i].top_sd = NULL;
+	}
+	ideTaskList = amalloc(&arena, taskListSize);
+	memset(ideTaskList, 0, taskListSize);
+	for (int i = 0; i < taskListLength; i++) {
+		ideTaskList[i].bottom_buf_ptr = -1;
+		ideTaskList[i].top_buf_ptr = -1;
+		ideTaskList[i].bottom_sd = NULL;
+		ideTaskList[i].top_sd = NULL;
 	}
 	intermediateBufferList = amalloc(&arena, intermediateBufferListSize);
 	memset(intermediateBufferList, 0, intermediateBufferListSize);
@@ -175,6 +187,7 @@ int main(int argc, char const *argv[]) {
 	fmp = amalloc(&arena, fmp_size);
 	hb = amalloc(&arena, hb_size);
 	iop = amalloc(&arena, iop_size);
+	idep = amalloc(&arena, idep_size);
 	taop = amalloc(&arena, taop_size);
 
 	task_fd_sd = amalloc(&arena, sizeof(struct socketDetails));
@@ -330,7 +343,7 @@ void handle_container(struct socketDetails *sd) {
 								continue;
 							}
 
-							createContainer(&taskList[tp->taskID]);
+							createContainer(&taskList[tp->taskID], tp->taskID);
 						} else if (done == ERROR || done == UNKNOWN) {
 							break;
 						}
@@ -655,7 +668,7 @@ void handle_assigner_fd(struct socketDetails *sd) {
 						continue;
 					}
 
-					createContainer(&taskList[tp->taskID]);
+					createContainer(&taskList[tp->taskID], tp->taskID);
 				} else if (done == ERROR || done == UNKNOWN) {
 					break;
 				}
@@ -727,8 +740,34 @@ void handle_task_fd(struct socketDetails *sd) {
 				requestTCPConnection(taskList[tp->taskID].top_sd->fd, addr,
 									 taskList[tp->taskID].top_sd);
 
+				ideTaskList[tp->taskID].filled = 1;
+				ideTaskList[tp->taskID].lastConnected = getCurrTime();
+				ideTaskList[tp->taskID].top_buf_ptr = -1;
+				ideTaskList[tp->taskID].bottom_buf_ptr = -1;
+				ideTaskList[tp->taskID].top_fd =
+					socket(AF_INET, SOCK_STREAM, 0);
+				setNonBlocking(ideTaskList[tp->taskID].top_fd);
+
+				if (ideTaskList[tp->taskID].top_sd == NULL) {
+					ideTaskList[tp->taskID].top_sd =
+						amalloc(&arena, sizeof(struct socketDetails));
+				}
+				ideTaskList[tp->taskID].top_sd->fd =
+					ideTaskList[tp->taskID].top_fd;
+				ideTaskList[tp->taskID].top_sd->data =
+					getNodeIB(ideTaskList[tp->taskID].top_fd);
+				ideTaskList[tp->taskID].top_sd->handler =
+					&handle_ide_assigner_fd;
+				ideTaskList[tp->taskID].top_sd->events = 0;
+
+				in_port_t old_port = addr->sin_port;
+				addr->sin_port = htons(atoi(IDE_PORT));
+				requestTCPConnection(ideTaskList[tp->taskID].top_sd->fd, addr,
+									 ideTaskList[tp->taskID].top_sd);
+				addr->sin_port = old_port;
+
 				// create a new container
-				createContainer(&taskList[tp->taskID]);
+				createContainer(&taskList[tp->taskID], tp->taskID);
 
 				printc(INFO, "worker - handle_task_fd",
 					   "container creation done for: %d", tp->taskID);
@@ -739,7 +778,168 @@ void handle_task_fd(struct socketDetails *sd) {
 	}
 }
 
+void handleInotifyWd(struct socketDetails *sd) {
+	struct InotifyDetails *iD = (struct InotifyDetails *)sd->data;
+	int taskID = iD->taskID;
+
+	char buffer[4096];
+	int length = read(sd->fd, buffer, sizeof(buffer));
+	if (length <= 0)
+		return;
+
+	int i = 0;
+	char moved_from_path[MAX_PATH_SIZE];
+	memset(moved_from_path, 0, MAX_PATH_SIZE);
+	uint32_t moved_from_cookie = 0;
+
+	while (i < length) {
+		struct inotify_event *ie = (struct inotify_event *)&buffer[i];
+		i += sizeof(struct inotify_event) + ie->len;
+
+		if (ie->len == 0)
+			continue; // No filename associated
+
+		// find wd path
+		char *wd_path = "";
+		for (int j = 0; j < iD->currInd; j++) {
+			if (iD->wds[j].wd == ie->wd) {
+				wd_path = iD->wds[j].path;
+				break;
+			}
+		}
+
+		char full_path[MAX_PATH_SIZE];
+		snprintf(full_path, MAX_PATH_SIZE, "%s/%s", wd_path, ie->name);
+
+		if (ie->mask & IN_MOVED_FROM) {
+			moved_from_cookie = ie->cookie;
+			strncpy(moved_from_path, full_path, MAX_PATH_SIZE - 1);
+		} else if (ie->mask & IN_MOVED_TO) {
+			if (moved_from_cookie == ie->cookie) {
+				// We have a rename!
+				send_ide_packet(taskID, IDE_RENAME, moved_from_path, full_path,
+								NULL, 0);
+				moved_from_cookie = 0;
+			}
+		} else if (ie->mask & IN_CREATE) {
+			if (ie->mask & IN_ISDIR) {
+				send_ide_packet(taskID, IDE_IS_DIR, full_path, NULL, NULL, 0);
+
+				// add watch
+				if (iD->currInd < MAX_INOTIFY_WATCH_DESCRIPTORS) {
+					char absolute_path[MAX_PATH_SIZE];
+					snprintf(absolute_path, MAX_PATH_SIZE, "/tmp/ca/t-%d%s",
+							 taskID, full_path);
+					int new_wd = inotify_add_watch(
+						sd->fd, absolute_path,
+						IN_MOVED_FROM | IN_MOVED_TO | IN_DELETE |
+							IN_CLOSE_WRITE | IN_CREATE);
+					if (new_wd >= 0) {
+						add_wd(iD, sd->fd, new_wd, full_path);
+					}
+				}
+			} else {
+				send_ide_packet(taskID, IDE_CREATE, full_path, NULL, NULL, 0);
+			}
+		} else if (ie->mask & IN_CLOSE_WRITE) {
+			if (!(ie->mask & IN_ISDIR)) {
+				// read file contents up to MAX_DATA_CAPACITY
+				char absolute_path[MAX_PATH_SIZE];
+				snprintf(absolute_path, MAX_PATH_SIZE, "/tmp/ca/t-%d%s", taskID,
+						 full_path);
+				int fd = open(absolute_path, O_RDONLY);
+				if (fd >= 0) {
+					uint8_t file_data[MAX_DATA_CAPACITY];
+					int bytes = read(fd, file_data, MAX_DATA_CAPACITY);
+					close(fd);
+					if (bytes >= 0) {
+						send_ide_packet(taskID, IDE_MODIFY, full_path, NULL,
+										file_data, bytes);
+					}
+				}
+			}
+		} else if (ie->mask & IN_DELETE) {
+			send_ide_packet(taskID, IDE_DELETE, full_path, NULL, NULL, 0);
+		}
+	}
+}
+
+void handle_ide_assigner_fd(struct socketDetails *sd) {
+	struct IntermediateBuffer *ib = (struct IntermediateBuffer *)sd->data;
+	if (sd->events & EPOLLIN) {
+		while (1) {
+			int done = getPacketData(sd->fd, ib->buf, &ib->buf_ptr,
+									 (uint8_t *)idep, idep_size);
+			if (done == YES) {
+				int taskID = -1;
+				for (int j = 0; j < taskListLength; j++) {
+					if (ideTaskList[j].filled == 1 &&
+						ideTaskList[j].top_fd == sd->fd) {
+						taskID = j;
+						break;
+					}
+				}
+				if (taskID == -1)
+					continue;
+
+				char abs_path[MAX_PATH_SIZE + 50];
+				snprintf(abs_path, sizeof(abs_path), "/tmp/ca/t-%d%s", taskID,
+						 idep->path);
+
+				if (idep->event == IDE_CREATE || idep->event == IDE_MODIFY) {
+					int fd = open(abs_path, O_CREAT | O_WRONLY | O_TRUNC, 0666);
+					if (fd >= 0) {
+						write(fd, idep->data, idep->data_size);
+						close(fd);
+					}
+				} else if (idep->event == IDE_DELETE) {
+					unlink(abs_path);
+					rmdir(abs_path);
+				} else if (idep->event == IDE_RENAME) {
+					char new_abs_path[MAX_PATH_SIZE + 50];
+					snprintf(new_abs_path, sizeof(new_abs_path),
+							 "/tmp/ca/t-%d%s", taskID, idep->new_path);
+					rename(abs_path, new_abs_path);
+				} else if (idep->event == IDE_IS_DIR) {
+					mkdir(abs_path, 0777);
+				}
+			} else if (done == ERROR || done == UNKNOWN) {
+				break;
+			}
+		}
+	}
+	if (sd->events & EPOLL_DESTROY) {
+		for (int j = 0; j < taskListLength; j++) {
+			if (ideTaskList[j].filled == 1 && ideTaskList[j].top_fd == sd->fd) {
+				ideTaskList[j].filled = 0;
+			}
+		}
+	}
+}
+
 // -------------------- UTILS --------------------
+
+void send_ide_packet(int taskID, int event, const char *path,
+					 const char *new_path, uint8_t *data, int data_size) {
+	if (ideTaskList[taskID].filled == 0)
+		return;
+	idep->packet_ID = PACKET_ID;
+	idep->packet_type = htonl(IDE_PACKET);
+	idep->node_type = WORKER_NODE;
+	idep->UID = UID;
+	idep->event = event;
+	idep->data_size = data_size;
+	memset(idep->path, 0, MAX_PATH_SIZE);
+	memset(idep->new_path, 0, MAX_PATH_SIZE);
+	if (path)
+		strncpy(idep->path, path, MAX_PATH_SIZE - 1);
+	if (new_path)
+		strncpy(idep->new_path, new_path, MAX_PATH_SIZE - 1);
+	if (data && data_size > 0)
+		memcpy(idep->data, data, data_size);
+
+	send(ideTaskList[taskID].top_fd, idep, idep_size, 0);
+}
 
 void killContainer(int fd) {
 	// works great on pty fds
@@ -812,7 +1012,7 @@ void sendTaskOverPacket(int fd) {
 	}
 }
 
-void createContainer(struct TaskDetail *t) {
+void createContainer(struct TaskDetail *t, int taskID) {
 	printc(INFO, "worker - createContainer",
 		   "Creating container for task: %d\n", tp->taskID);
 	int master_fd = posix_openpt(O_RDWR | O_NOCTTY);
@@ -834,6 +1034,70 @@ void createContainer(struct TaskDetail *t) {
 
 	// allocate the stack
 	uint8_t *stack = malloc(sizeof(uint8_t) * CONTAINER_STACK_SIZE);
+
+	char *path[13];
+	memset(path, 0, 13);
+	snprintf(path, 13, "/tmp/ca/u-%d", taskID);
+	mkdir(path, 0755);
+	memset(path, 0, 13);
+	snprintf(path, 13, "/tmp/ca/w-%d", taskID);
+	mkdir(path, 0755);
+	memset(path, 0, 13);
+	snprintf(path, 13, "/tmp/ca/t-%d", taskID);
+	mkdir(path, 0777);
+	chdir(path);
+
+	char *options[74];
+	memset(options, 0, 74);
+	snprintf(options, 74,
+			 "lowerdir=/var/lib/ubuntu-base,upperdir=/tmp/ca/u-%d,workdir=/tmp/"
+			 "ca/w-%d",
+			 taskID, taskID);
+
+	if (mount("overlay", path, "overlay", 0, options) == -1) {
+		printc(ERR, "worker - createContainer",
+			   "Could not mount the OverlayFS");
+		close(slave_fd);
+		close(master_fd);
+		perror("overlay");
+		return;
+	}
+
+	int inotifyFd = inotify_init1(IN_NONBLOCK);
+
+	int wd = inotify_add_watch(inotifyFd, path,
+							   IN_MOVED_FROM | IN_MOVED_TO | IN_DELETE |
+								   IN_CLOSE_WRITE);
+
+	if (wd < 0) {
+		printc(ERR, "worker - createContainer",
+			   "Failed to add inotify watch descriptor\n");
+		close(slave_fd);
+		close(master_fd);
+		perror("inotify_add_watch");
+		return;
+	}
+
+	struct InotifyDetails *iD = amalloc(&arena, sizeof(struct InotifyDetails));
+	iD->taskID = taskID;
+	// this code is not reachable, but kept in case of rare kernel memory fill
+	// up bugs
+	if (add_wd(iD, inotifyFd, wd, "/") == NO) {
+		printc(ERR, "worker - createContainer",
+			   "Failed to add inotify new watch descriptor\n");
+		close(slave_fd);
+		close(master_fd);
+		inotify_rm_watch(inotifyFd, wd);
+		perror("add_wd");
+		return;
+	}
+
+	struct socketDetails *wdSd = amalloc(&arena, sizeof(struct socketDetails));
+	wdSd->fd = wd;
+	wdSd->handler = handleInotifyWd;
+	wdSd->events = 0;
+	wdSd->data = iD;
+	addFDToEpoll(inotifyFd, EPOLLOUT | EPOLLIN | EPOLLERR, wdSd);
 
 	printc(INFO, "worker - createContainer", "cloning\n");
 
@@ -873,6 +1137,20 @@ void createContainer(struct TaskDetail *t) {
 	addFDToEpoll(master_fd, EPOLL_OUT | EPOLLIN | EPOLL_DESTROY, t->bottom_sd);
 
 	printc(INFO, "worker - createContainer", "Container created\n");
+}
+
+int add_wd(struct InotifyDetails *iD, int inotifyFd, int wd, char *path) {
+	if (iD->currInd == MAX_INOTIFY_WATCH_DESCRIPTORS) {
+		return NO;
+	}
+
+	iD->inotifyFd = inotifyFd;
+	iD->currInd = 0;
+	iD->wds[iD->currInd].wd = wd;
+	snprintf(iD->wds[iD->currInd].path, sizeof(iD->wds[iD->currInd].path), "%s",
+			 path);
+	iD->currInd++;
+	return YES;
 }
 
 /**

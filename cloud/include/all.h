@@ -9,9 +9,9 @@
 #include "network.h"
 #include "print.h"
 #include "utils.h"
-#include <execinfo.h>
 
 #include <errno.h>
+#include <execinfo.h>
 #include <fcntl.h>
 #include <ifaddrs.h>
 #include <net/if.h>
@@ -22,7 +22,11 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/epoll.h>
+#include <sys/inotify.h>
 #include <sys/ioctl.h>
+#include <sys/mount.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
 #include <sys/timerfd.h>
 #include <sys/wait.h>
 #include <time.h>

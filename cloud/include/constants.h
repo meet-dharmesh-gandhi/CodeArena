@@ -31,6 +31,7 @@ enum Packets {
 	DEMOTE_PACKET,
 	FIND_MONITOR_PACKET,
 	GENERIC_PACKET,
+	IDE_PACKET,
 };
 
 enum NodeTypes {
@@ -39,6 +40,26 @@ enum NodeTypes {
 	ASSIGNER_NODE,
 	WORKER_NODE,
 	EMPTY_NODE
+};
+
+enum MemoryUnits {
+	MB,
+	KB,
+};
+
+enum RunMode {
+	TEST_MODE,
+	SUBMIT_MODE,
+	SETUP_MODE,
+	TERMINAL_MODE,
+};
+
+enum IDEEvents {
+	IDE_CREATE,
+	IDE_MODIFY,
+	IDE_DELETE,
+	IDE_RENAME,
+	IDE_IS_DIR,
 };
 
 #define YES -1
@@ -65,7 +86,11 @@ enum NodeTypes {
 
 #define MAX_FILE_SIZE 100000 // in bytes
 #define MAX_FILES 30
+#define MAX_INPUTS 30
+#define MAX_OUTPUT_SIZE 65536
 #define MAX_FILENAME_SIZE 256 // in bytes
+#define MAX_INOTIFY_WATCH_DESCRIPTORS 1000
+#define MAX_PATH_SIZE 252
 
 #define EXPIRE_PERIOD (HEARTBEAT_INTERVAL * MAX_MISSES)
 #define TASK_EXPIRE_PERIOD 600000 // 10 minutes (600,000 milliseconds)
@@ -107,6 +132,8 @@ enum NodeTypes {
 	"8002" // for getting assigner and worker addresses from monitor
 #define HEARTBEAT_PORT "8003" // for heartbeats simply
 #define ROLE_PORT "8004"	  // for promote/demote packets
+#define FILE_PORT "8005"	  // for FS update packets
+#define IDE_PORT "8006"
 
 #pragma pack(push, 1)
 
@@ -154,6 +181,8 @@ struct io_packet {
 	int node_type;
 	int UID;
 	int task_ID;
+	int type; // 0 - terminal, 1 - headless
+	int last;
 	int data_size;
 	uint8_t data[MAX_DATA_CAPACITY];
 };
@@ -212,6 +241,18 @@ struct promotion_packet {
 	int UID;
 	int promoted_node_type;
 	int target_node_type;
+};
+
+struct ide_packet {
+	int packet_ID;
+	int packet_type;
+	int node_type;
+	int UID;
+	int event; // IDE_CREATE, IDE_MODIFY, IDE_DELETE, IDE_RENAME, IDE_IS_DIR
+	int data_size;
+	char path[MAX_PATH_SIZE];
+	char new_path[MAX_PATH_SIZE];
+	uint8_t data[MAX_DATA_CAPACITY];
 };
 
 #pragma pack(pop)
@@ -287,6 +328,18 @@ struct MonitorRecord {
 	int assigners;
 	int gateways;
 	int totalNodes;
+};
+
+struct InotifyDetails {
+	int taskID;
+	int inotifyFd;
+	uint16_t currInd;
+	struct WatchDescriptor wds[MAX_INOTIFY_WATCH_DESCRIPTORS];
+};
+
+struct WatchDescriptor {
+	int wd;
+	char path[MAX_PATH_SIZE];
 };
 
 #endif
