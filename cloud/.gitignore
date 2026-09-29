@@ -14,5 +14,6 @@ logs*.txt
 /make/**
 /g++/**
 /err/**
+/ubuntu-base/
 
 **/build/**
