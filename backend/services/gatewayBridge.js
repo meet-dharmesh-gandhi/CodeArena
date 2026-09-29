@@ -230,14 +230,27 @@ const initTerminal = async ({ sessionId, gatewayUrl, files }) => {
 	const session = await createSession({ sessionId, gatewayUrl });
 
 	if (!session.filesSent) {
-		const frame = buildFilesFrame(files);
-		session.ws.send(frame);
-		session.filesSent = true;
-		session.lastActivity = Date.now();
-		emitSystem(
-			sessionId,
-			`Sent ${Array.isArray(files) ? files.length : 0} file(s) to gateway.`,
-		);
+		const fileFrame = buildFilesFrame(files);
+		const setupFrame = Buffer.alloc(fileFrame.length + 1);
+		setupFrame.writeUInt8(2, 0); // SETUP_MODE
+		fileFrame.copy(setupFrame, 1);
+		
+		// Send files via type: 1 to trigger SETUP_MODE in the ephemeral container
+		session.ws.send(JSON.stringify({ type: 1, data: Array.from(setupFrame) }));
+		
+		setTimeout(() => {
+			if (session.ws.readyState === WebSocket.OPEN) {
+				// Send TERMINAL_MODE (3) as raw bytes to trigger type: 0
+				session.ws.send(Buffer.from([3]));
+				
+				session.filesSent = true;
+				session.lastActivity = Date.now();
+				emitSystem(
+					sessionId,
+					`Sent ${Array.isArray(files) ? files.length : 0} file(s) and started terminal.`,
+				);
+			}
+		}, 300);
 	}
 
 	return session;
@@ -321,7 +334,20 @@ setInterval(() => {
 	}
 }, 60 * 1000).unref();
 
+
+const sendIdePacket = ({ sessionId, packet }) => {
+	const session = sessions.get(sessionId);
+	if (!session || session.ws.readyState !== WebSocket.OPEN) {
+		throw new Error(
+			"Terminal session is not connected. Initialize session first.",
+		);
+	}
+	session.ws.send(JSON.stringify(packet));
+	session.lastActivity = Date.now();
+};
+
 module.exports = {
+	sendIdePacket,
 	toSessionId,
 	initTerminal,
 	sendInput,

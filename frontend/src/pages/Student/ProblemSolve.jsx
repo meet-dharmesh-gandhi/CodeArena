@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import Editor from "@monaco-editor/react";
 import Terminal from "../../components/Terminal";
+import { loadFilesFromOPFS, saveFileToOPFS, deleteFileFromOPFS } from "../../utils/opfs";
 
 const LANGUAGES = [
 	{
@@ -113,6 +114,22 @@ const ProblemSolve = () => {
 	const fetchData = async () => {
 		try {
 			setLoading(true);
+			
+			// Load OPFS files if any
+			const opfsFiles = await loadFilesFromOPFS(problemId);
+			if (opfsFiles.length > 0) {
+				setFiles(opfsFiles);
+				const mainOpfsFile = opfsFiles.find(f => f.name.startsWith("main."));
+				if (mainOpfsFile) {
+					const ext = mainOpfsFile.name.split('.').pop();
+					const lang = LANGUAGES.find(l => l.ext === ext);
+					if (lang) {
+						setLanguage(lang);
+						setMainFile(mainOpfsFile.name);
+					}
+				}
+			}
+
 			const [contestRes, problemRes] = await Promise.all([
 				fetch(`${API_BASE}/api/contests/${contestId}`),
 				fetch(`${API_BASE}/api/problems/${problemId}`),
@@ -437,14 +454,19 @@ const ProblemSolve = () => {
 		if (name && !files.find((f) => f.name === name)) {
 			setFiles([...files, { name, content: "" }]);
 			setActiveFileIndex(files.length);
+			saveFileToOPFS(problemId, name, "");
+			sendIdeUpdate(0, name, null, null); // 0=CREATE
 		}
 	};
 
 	const deleteFile = (index) => {
 		if (files.length === 1) return;
+		const filename = files[index].name;
 		const newFiles = files.filter((_, i) => i !== index);
 		setFiles(newFiles);
 		setActiveFileIndex(Math.max(0, activeFileIndex - 1));
+		deleteFileFromOPFS(problemId, filename);
+		sendIdeUpdate(2, filename, null, null); // 2=DELETE
 	};
 
 	const pollJobStatus = async (jobId) => {
@@ -574,6 +596,40 @@ const ProblemSolve = () => {
 		}
 	};
 
+	const sendIdeUpdate = (event, path, newPath, content) => {
+		if (!terminalSessionRef.current) return;
+
+		const frame = new Uint8Array(784);
+		frame[2] = 0; frame[3] = 0; frame[4] = 0; frame[5] = 4; // IDE_PACKET
+		frame[6] = 2; // GATEWAY_NODE
+		frame[13] = event; // 0=CREATE, 1=MODIFY, 2=DELETE, 3=RENAME
+
+		const pathBuf = new TextEncoder().encode(path || "");
+		frame.set(pathBuf.slice(0, 255), 14);
+
+		if (newPath) {
+			const newPathBuf = new TextEncoder().encode(newPath);
+			frame.set(newPathBuf.slice(0, 255), 270);
+		}
+
+		if (content) {
+			const contentBuf = new TextEncoder().encode(content);
+			const dataSize = Math.min(contentBuf.length, 256);
+			frame[526] = dataSize & 0xff;
+			frame[527] = (dataSize >> 8) & 0xff;
+			frame.set(contentBuf.slice(0, 256), 528);
+		}
+
+		fetch(`${API_BASE}/api/terminal/ide`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				sessionId: terminalSessionRef.current,
+				packet: { type: 2, data: Array.from(frame) }
+			})
+		}).catch(console.error);
+	};
+
 	const ensureTerminalSession = async () => {
 		if (terminalSessionRef.current) return terminalSessionRef.current;
 		if (terminalInitInFlightRef.current) return null;
@@ -611,13 +667,50 @@ const ProblemSolve = () => {
 				es.onmessage = (event) => {
 					try {
 						const payload = JSON.parse(event.data);
-						// console.log("payload: ", JSON.stringify(payload));
+						
+						// Intercept IDE packets (which gateway.js sends as stringified JSON under payload)
+						if (payload.type === "output" && payload.payload.startsWith('{"type":2')) {
+							try {
+								const idePkt = JSON.parse(payload.payload);
+								if (idePkt.type === 2 && Array.isArray(idePkt.data)) {
+									// data is Uint8Array layout
+									const frame = idePkt.data;
+									const ideEvent = frame[13];
+									const pathBytes = frame.slice(14, 14 + 256);
+									let pathStr = new TextDecoder().decode(new Uint8Array(pathBytes)).split('\0')[0];
+									if (pathStr.startsWith('/tmp/ca/')) {
+										pathStr = pathStr.substring(pathStr.lastIndexOf('/') + 1);
+									}
+									
+									if (ideEvent === 0 || ideEvent === 1) { // CREATE or MODIFY
+										const dataSize = frame[526] | (frame[527] << 8);
+										const contentBytes = frame.slice(528, 528 + dataSize);
+										const contentStr = new TextDecoder().decode(new Uint8Array(contentBytes));
+										setFiles(prev => {
+											const existing = prev.findIndex(f => f.name === pathStr);
+											const next = [...prev];
+											if (existing >= 0) {
+												next[existing].content = contentStr;
+											} else {
+												next.push({ name: pathStr, content: contentStr });
+											}
+											return next;
+										});
+										saveFileToOPFS(problemId, pathStr, contentStr);
+									} else if (ideEvent === 2) { // DELETE
+										setFiles(prev => prev.filter(f => f.name !== pathStr));
+										deleteFileFromOPFS(problemId, pathStr);
+									}
+									return;
+								}
+							} catch(err) {}
+						}
+						
 						pushTerminalEvent(
 							payload.type || "output",
 							payload.payload || "",
 						);
 					} catch (e) {
-						// console.log(JSON.stringify(event.data));
 						pushTerminalEvent("output", event.data || "");
 					}
 				};
@@ -1163,6 +1256,9 @@ const ProblemSolve = () => {
 											newFiles[activeFileIndex].content =
 												value || "";
 											setFiles(newFiles);
+											const filename = newFiles[activeFileIndex].name;
+											saveFileToOPFS(problemId, filename, value || "");
+											sendIdeUpdate(1, filename, null, value || ""); // 1=MODIFY
 											// Sync 'code' state if it's the main entry file
 											if (
 												newFiles[activeFileIndex]

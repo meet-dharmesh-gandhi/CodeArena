@@ -20,7 +20,7 @@ const Assignment = require("./models/Assignment");
 const {
 	toSessionId,
 	initTerminal,
-	sendInput,
+	sendInput, sendIdePacket,
 	attachSseClient,
 	closeSession,
 } = require("./services/gatewayBridge");
@@ -546,6 +546,21 @@ app.post("/api/terminal/init", async (req, res) => {
 
 		res.json({ message: "Terminal session initialized", sessionId });
 	} catch (error) {
+		res.status(500).json({ message: error.message });
+	}
+});
+
+
+app.post("/api/terminal/ide", async (req, res) => {
+	try {
+		const { sessionId, packet } = req.body;
+		if (!sessionId || !packet) {
+			return res.status(400).json({ message: "Missing sessionId or packet" });
+		}
+		sendIdePacket({ sessionId, packet });
+		res.json({ message: "IDE packet sent" });
+	} catch (error) {
+		console.error("IDE packet error:", error);
 		res.status(500).json({ message: error.message });
 	}
 });

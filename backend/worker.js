@@ -1,7 +1,7 @@
 const { Worker } = require('bullmq');
 const mongoose = require('mongoose');
-const { exec, spawn } = require('child_process');
 const dotenv = require('dotenv');
+const WebSocket = require('ws');
 const Submission = require('./models/Submission');
 const Problem = require('./models/Problem');
 const { connection } = require('./queue');
@@ -13,156 +13,182 @@ mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('Worker connected to MongoDB'))
   .catch(err => console.error('Worker MongoDB error:', err));
 
-const JUDGE_CONTAINER = 'judge0-ce-worker-1';
+const GATEWAY_WS_URL = process.env.GATEWAY_WS_URL || "ws://localhost:3000";
 
 const LANG_CONFIG = {
   c:      { ext: 'c',    compile: 'gcc *.c -o bin -lm',  run: './bin' },
   cpp:    { ext: 'cpp',  compile: 'g++ *.cpp -o bin',    run: './bin' },
   java:   { ext: 'java', compile: 'javac *.java',        run: 'java Main' },
-  python: { ext: 'py',   compile: null,                  run: 'python3 /tmp/__code.py' },
-  bash:   { ext: 'sh',   compile: null,                  run: 'bash /tmp/__code.sh' },
-  shell:  { ext: 'sh',   compile: null,                  run: 'bash /tmp/__code.sh' },
+  python: { ext: 'py',   compile: null,                  run: 'python3 main.py' },
+  bash:   { ext: 'sh',   compile: null,                  run: 'bash main.sh' },
+  shell:  { ext: 'sh',   compile: null,                  run: 'bash main.sh' },
 };
 
-const fs = require('fs');
-const path = require('path');
+const buildFilesFrame = (files) => {
+	const normalizedFiles = Array.isArray(files) ? files : [];
+	const encodedFiles = normalizedFiles.map((f) => {
+		const nameBuf = Buffer.from(String(f?.name || "main.txt"), "utf8");
+		const contentBuf = Buffer.from(String(f?.content || ""), "utf8");
+		return { nameBuf, contentBuf };
+	});
 
-const runDockerExec = (cmd) => new Promise((resolve) => {
-  exec(cmd, { timeout: 15000 }, (err, stdout, stderr) => {
-    if (err && !cmd.includes('rm')) {
-      console.error(`Command failed: ${cmd}`);
-      console.error(`Stderr: ${stderr}`);
-    }
-    resolve({ stdout: stdout || '', stderr: stderr || '', exitCode: err ? (err.code || 1) : 0 });
+	let totalSize = 1;
+	for (const f of encodedFiles) totalSize += 1 + f.nameBuf.length + 4 + f.contentBuf.length;
+
+	const frame = Buffer.alloc(totalSize);
+	let offset = 0;
+	frame.writeUInt8(encodedFiles.length, offset); offset += 1;
+
+	for (const f of encodedFiles) {
+		frame.writeUInt8(f.nameBuf.length, offset); offset += 1;
+		f.nameBuf.copy(frame, offset); offset += f.nameBuf.length;
+		frame.writeUInt32LE(f.contentBuf.length, offset); offset += 4;
+		f.contentBuf.copy(frame, offset); offset += f.contentBuf.length;
+	}
+	return frame;
+};
+
+const executeCodeArena = (files, testCases, language, isSubmit) => {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(GATEWAY_WS_URL);
+    let resolved = false;
+
+    const cleanup = () => {
+        if (ws.readyState === WebSocket.OPEN) ws.close();
+    };
+
+    ws.on('open', () => {
+        console.log("Connected to Gateway for execution");
+        // 1. Send SETUP_MODE
+        const fileFrame = buildFilesFrame(files);
+        const setupFrame = Buffer.alloc(fileFrame.length + 1);
+        setupFrame.writeUInt8(2, 0); // SETUP_MODE (2)
+        fileFrame.copy(setupFrame, 1);
+        
+        ws.send(JSON.stringify({ type: 1, data: Array.from(setupFrame) }));
+
+        // 2. Send TEST_MODE (0) or SUBMIT_MODE (1)
+        setTimeout(() => {
+            const cfg = LANG_CONFIG[language] || LANG_CONFIG['python'];
+            const cmd = cfg.compile ? `${cfg.compile} && ${cfg.run}` : cfg.run;
+            const cmdBuf = Buffer.from(cmd, 'utf8');
+
+            // Calculate total size for execution packet
+            let totalSize = 1 + 1 + 1 + 1 + 2 + cmdBuf.length + 2; // mode, time_limit, memory_limit, mem_unit, cmd_size, command, num_inputs
+            for (const tc of testCases) {
+                const inputBuf = Buffer.from(tc.input || '', 'utf8');
+                totalSize += 2 + inputBuf.length; // 2 bytes length, input data
+                if (isSubmit) {
+                    const outputBuf = Buffer.from(tc.output || '', 'utf8');
+                    totalSize += 2 + outputBuf.length; // 2 bytes length, output data
+                }
+            }
+
+            const execFrame = Buffer.alloc(totalSize);
+            let offset = 0;
+            execFrame.writeUInt8(isSubmit ? 1 : 0, offset); offset += 1; // Mode
+            execFrame.writeUInt8(10, offset); offset += 1; // 10s Time Limit
+            execFrame.writeUInt8(250, offset); offset += 1; // 250MB Memory Limit
+            execFrame.writeUInt8(0, offset); offset += 1; // Memory unit: MB (0)
+            
+            execFrame.writeUInt16LE(cmdBuf.length, offset); offset += 2;
+            cmdBuf.copy(execFrame, offset); offset += cmdBuf.length;
+
+            execFrame.writeUInt16LE(testCases.length, offset); offset += 2;
+
+            for (const tc of testCases) {
+                const inputBuf = Buffer.from(tc.input || '', 'utf8');
+                execFrame.writeUInt16LE(inputBuf.length, offset); offset += 2;
+                inputBuf.copy(execFrame, offset); offset += inputBuf.length;
+
+                if (isSubmit) {
+                    const outputBuf = Buffer.from(tc.output || '', 'utf8');
+                    execFrame.writeUInt16LE(outputBuf.length, offset); offset += 2;
+                    outputBuf.copy(execFrame, offset); offset += outputBuf.length;
+                }
+            }
+
+            ws.send(JSON.stringify({ type: 1, data: Array.from(execFrame) }));
+        }, 500); // Give setup a tiny moment to complete writing files
+    });
+
+    let rawBuffer = Buffer.alloc(0);
+
+    ws.on('message', (msg) => {
+        // Output from container.c
+        const chunk = Buffer.isBuffer(msg) ? msg : Buffer.from(msg, 'utf8');
+        rawBuffer = Buffer.concat([rawBuffer, chunk]);
+
+        // Attempt to parse results based on mode
+        try {
+            if (!isSubmit) {
+                // TEST_MODE
+                if (rawBuffer.length >= 1) {
+                    const numOutputs = rawBuffer.readUInt8(0);
+                    let offset = 1;
+                    const results = [];
+                    for (let i = 0; i < numOutputs; i++) {
+                        if (rawBuffer.length < offset + 1 + 1 + 2 + 1 + 2) return; // Wait for more data
+                        const time_sec = rawBuffer.readUInt8(offset); offset += 1;
+                        const time_ms = rawBuffer.readUInt8(offset); offset += 1;
+                        const mem = rawBuffer.readUInt16LE(offset); offset += 2;
+                        const mem_unit = rawBuffer.readUInt8(offset); offset += 1;
+                        const logSize = rawBuffer.readUInt16LE(offset); offset += 2;
+
+                        if (rawBuffer.length < offset + logSize) return; // Wait for more data
+                        const logData = rawBuffer.subarray(offset, offset + logSize).toString('utf8');
+                        offset += logSize;
+
+                        results.push({
+                            executionTime: (time_sec * 1000) + time_ms,
+                            memoryUsed: mem,
+                            output: logData
+                        });
+                    }
+                    if (!resolved) { resolved = true; resolve(results); cleanup(); }
+                }
+            } else {
+                // SUBMIT_MODE
+                if (rawBuffer.length >= 1) {
+                    const numOutputs = rawBuffer.readUInt8(0);
+                    let offset = 1;
+                    const results = [];
+                    for (let i = 0; i < numOutputs; i++) {
+                        if (rawBuffer.length < offset + 1 + 1 + 2 + 1 + 1) return; // Wait for more data
+                        const time_sec = rawBuffer.readUInt8(offset); offset += 1;
+                        const time_ms = rawBuffer.readUInt8(offset); offset += 1;
+                        const mem = rawBuffer.readUInt16LE(offset); offset += 2;
+                        const mem_unit = rawBuffer.readUInt8(offset); offset += 1;
+                        const passed = rawBuffer.readUInt8(offset); offset += 1;
+
+                        results.push({
+                            executionTime: (time_sec * 1000) + time_ms,
+                            memoryUsed: mem,
+                            passed: passed !== 0
+                        });
+                    }
+                    if (!resolved) { resolved = true; resolve(results); cleanup(); }
+                }
+            }
+        } catch (e) {
+            console.error("Error parsing binary output", e);
+        }
+    });
+
+    ws.on('error', (err) => {
+        if (!resolved) { resolved = true; reject(err); cleanup(); }
+    });
+    ws.on('close', () => {
+        if (!resolved) { resolved = true; reject(new Error("Connection closed before completion")); }
+    });
   });
-});
-
-// Helper to write data to container via stdin pipe
-const writeToContainer = (data, containerPath) => new Promise((resolve, reject) => {
-  if (data === undefined) {
-    console.warn(`Warning: undefined data passed to writeToContainer for ${containerPath}`);
-  }
-  
-  const content = (data === undefined || data === null) ? '' : String(data);
-  
-  console.log(`Writing ${content.length} bytes to ${containerPath}`);
-
-  const child = spawn('docker', ['exec', '-i', JUDGE_CONTAINER, 'bash', '-c', `cat > ${containerPath}`]);
-  
-  child.stdin.write(content);
-  child.stdin.end();
-
-  child.on('close', (code) => {
-    if (code === 0) resolve();
-    else reject(new Error(`Failed to write to container at ${containerPath} (exit code ${code})`));
-  });
-  
-  child.on('error', (err) => {
-    reject(err);
-  });
-});
-
-const executeJudge0 = async (files, input, language, jobId, command = null, mainFile = null) => {
-  const cfg = LANG_CONFIG[language] || LANG_CONFIG['python'];
-  const workDir = `/tmp/${jobId}`;
-  const startTime = Date.now();
-  
-  try {
-    // 0. Create work directory
-    await runDockerExec(`docker exec ${JUDGE_CONTAINER} mkdir -p ${workDir}`);
-
-    // 1. Write all files to work directory
-    for (const file of files) {
-      await writeToContainer(file.content, `${workDir}/${file.name}`);
-    }
-    
-    // 2. Write stdin if provided
-    await writeToContainer(input || '', `${workDir}/stdin.txt`);
-
-    // 3. Compile if needed
-    const entryFile = mainFile || files[0].name;
-    const entryFileNameOnly = entryFile.split('.')[0];
-
-    if (cfg.compile) {
-      const compileCmd = cfg.compile
-        .replace(/\/tmp\/__code/g, `${workDir}/${entryFileNameOnly}`)
-        .replace(/\/tmp\/__code_bin/g, `${workDir}/bin`);
-      
-      await runDockerExec(`docker exec ${JUDGE_CONTAINER} bash -c "cd ${workDir} && ${compileCmd} 2>compile_err.txt; echo $? > compile_exit.txt"`);
-      const compileExitResult = await runDockerExec(`docker exec ${JUDGE_CONTAINER} cat ${workDir}/compile_exit.txt`);
-      const compileExitCode = parseInt(compileExitResult.stdout.trim()) || 0;
-      
-      if (compileExitCode !== 0) {
-        const compileErr = await runDockerExec(`docker exec ${JUDGE_CONTAINER} cat ${workDir}/compile_err.txt`);
-        return {
-          stdout: '', stderr: compileErr.stdout, compile_output: compileErr.stdout,
-          status: 'Compilation Error', statusId: 6,
-          executionTime: Date.now() - startTime, memoryUsed: 0,
-        };
-      }
-    }
-
-    // 4. Run code
-    let runCmd = command;
-    if (!runCmd) {
-      runCmd = cfg.run
-        .replace(/\/tmp\/__code/g, `${workDir}/${entryFileNameOnly}`)
-        .replace(/\/tmp\/__code_bin/g, `${workDir}/bin`);
-      
-      if (language === 'java') {
-        const className = entryFileNameOnly || 'Solution';
-        runCmd = `java -cp . ${className}`; 
-      }
-    }
-
-    await runDockerExec(
-      `docker exec ${JUDGE_CONTAINER} bash -c "cd ${workDir} && timeout 10 ${runCmd} < stdin.txt > stdout.txt 2>stderr.txt; echo $? > exit.txt"`
-    );
-
-    // 5. Collect results
-    const [stdoutResult, stderrResult, exitResult] = await Promise.all([
-      runDockerExec(`docker exec ${JUDGE_CONTAINER} cat ${workDir}/stdout.txt`),
-      runDockerExec(`docker exec ${JUDGE_CONTAINER} cat ${workDir}/stderr.txt`),
-      runDockerExec(`docker exec ${JUDGE_CONTAINER} cat ${workDir}/exit.txt`),
-    ]);
-
-    // 6. Cleanup (Container)
-    runDockerExec(`docker exec ${JUDGE_CONTAINER} rm -rf ${workDir}`);
-    
-    // 7. Cleanup (Local - no longer needed but keeping for safety if used elsewhere)
-    try {
-      const localPrefix = path.join(__dirname, 'tmp', `${jobId}_`);
-      if (fs.existsSync(`${localPrefix}code.${cfg.ext}`)) fs.unlinkSync(`${localPrefix}code.${cfg.ext}`);
-      if (fs.existsSync(`${localPrefix}stdin.txt`)) fs.unlinkSync(`${localPrefix}stdin.txt`);
-    } catch (e) {}
-
-    const stdout = stdoutResult.stdout || '';
-    const stderr = stderrResult.stdout || '';
-    const exitCodeStr = exitResult.stdout.trim();
-    const exitCode = exitCodeStr !== '' ? parseInt(exitCodeStr) : -1;
-    const elapsed = Date.now() - startTime;
-
-    let status = 'Accepted';
-    let statusId = 3;
-    if (exitCode === -1) { status = 'Judge Error'; statusId = 13; }
-    else if (exitCode === 124) { status = 'Time Limit Exceeded'; statusId = 5; }
-    else if (exitCode !== 0) { status = 'Runtime Error'; statusId = 11; }
-
-    return { stdout, stderr, compile_output: '', status, statusId, executionTime: elapsed, memoryUsed: 0 };
-  } catch (err) {
-    console.error('JUDGE EXECUTION ERROR:', err);
-    return { status: 'Judge Error', stderr: err.message, stdout: '', compile_output: '', executionTime: 0, statusId: 13 };
-  }
 };
 
 const worker = new Worker('submission-queue', async (job) => {
   const { submissionId, problemId, files, code, mainFile, language, customInput, type, command } = job.data;
   
-  // Backwards compatibility for single 'code' field
-  const normalizedFiles = files || [{ name: `solution.${LANG_CONFIG[language]?.ext || 'txt'}`, content: code }];
-
+  const normalizedFiles = files || [{ name: `main.${LANG_CONFIG[language]?.ext || 'txt'}`, content: code }];
   const jobId = job.id;
-  
   console.log(`Processing ${type} for job ${jobId}`);
 
   try {
@@ -170,118 +196,136 @@ const worker = new Worker('submission-queue', async (job) => {
     if (!problem) throw new Error('Problem not found');
 
     if (type === 'run' || type === 'terminal') {
-        const result = await executeJudge0(normalizedFiles, customInput || '', language, jobId, command, mainFile);
-        
-        if (type === 'terminal') return { results: result };
-
-        const sampleCases = problem.testCases.filter(tc => tc.isSample);
-        const sampleResults = await Promise.all(sampleCases.map(async (tc, idx) => {
-          const run = await executeJudge0(normalizedFiles, tc.input, language, `${jobId}_s${idx}`, null, mainFile);
-          const passed = run.statusId === 3 && (run.stdout || '').trim() === (tc.output || '').trim();
-          return { 
-            input: tc.input, 
-            expectedOutput: tc.output, 
-            actualOutput: run.stdout,
-            passed,
-            status: run.status
-          };
-        }));
-
-        const firstFailedSample = sampleResults.find(r => !r.passed);
-        let finalStatus = result.status;
-        if (result.statusId === 3 && firstFailedSample) {
-            finalStatus = 'Rejected';
-        } else if (result.statusId !== 3 && result.statusId !== 6) {
-            finalStatus = 'Rejected';
+        // TEST MODE
+        let testCases = [];
+        if (customInput) {
+            testCases = [{ input: customInput }];
+        } else {
+            const sampleCases = problem.testCases.filter(tc => tc.isSample);
+            testCases = sampleCases.length > 0 ? sampleCases : [{ input: '' }];
         }
 
-        const totalPassed = sampleResults.filter(r => r.passed).length;
-        const totalTestCases = sampleCases.length;
+        const results = await executeCodeArena(normalizedFiles, testCases, language, false);
+
+        if (type === 'terminal') return { results };
+
+        let finalStatus = 'Accepted';
+        let totalExecutionTime = 0;
+        let maxMemory = 0;
+        
+        const sampleCases = problem.testCases.filter(tc => tc.isSample);
+        const mappedResults = testCases.map((tc, idx) => {
+            const res = results[idx] || { executionTime: 0, memoryUsed: 0, output: '' };
+            totalExecutionTime += res.executionTime;
+            maxMemory = Math.max(maxMemory, res.memoryUsed);
+
+            let passed = false;
+            let status = 'Accepted';
+            if (res.output.includes('Compilation Error')) { // Basic check, ideally from stderr but container groups them
+                status = 'Compilation Error';
+            } else if (res.output.includes('Runtime Error')) {
+                status = 'Runtime Error';
+            } else {
+                if (sampleCases[idx]) {
+                    passed = res.output.trim() === sampleCases[idx].output.trim();
+                    status = passed ? 'Accepted' : 'Wrong Answer';
+                } else {
+                    passed = true;
+                }
+            }
+
+            if (!passed && finalStatus === 'Accepted') finalStatus = status;
+
+            return {
+                input: tc.input,
+                expectedOutput: sampleCases[idx]?.output || '',
+                actualOutput: res.output,
+                passed,
+                status
+            };
+        });
+
+        const totalPassed = mappedResults.filter(r => r.passed).length;
+        const totalTestCases = mappedResults.length;
         const earnedPoints = totalTestCases > 0 ? (totalPassed / totalTestCases) * (problem.points || 100) : 0;
 
-        const detailedResults = { 
-            sampleCases: sampleResults, 
-            status: finalStatus, 
+        const detailedResults = {
+            sampleCases: mappedResults,
+            status: finalStatus,
             points: earnedPoints,
             totalPassed,
             totalTestCases,
-            ...result 
+            executionTime: totalExecutionTime,
+            memoryUsed: maxMemory,
+            outputFile: mappedResults[0]?.actualOutput // For backwards compatibility
         };
 
         if (submissionId) {
             await Submission.findByIdAndUpdate(submissionId, {
-                status: finalStatus, // Could be 'Accepted', 'Rejected', etc.
+                status: finalStatus,
                 results: detailedResults,
                 points: earnedPoints,
-                executionTime: result.executionTime,
-                memoryUsed: result.memoryUsed
+                executionTime: totalExecutionTime,
+                memoryUsed: maxMemory
             });
         }
 
         return { results: detailedResults };
     } else {
-        // Full submission
-        const firstInput = problem.testCases.length > 0 ? problem.testCases[0].input : "";
-        const mainResult = await executeJudge0(normalizedFiles, firstInput, language, jobId, null, mainFile);
-        
-        const sampleCases = problem.testCases.filter(tc => tc.isSample);
-        const sampleResults = await Promise.all(sampleCases.map(async (tc, idx) => {
-          const run = await executeJudge0(normalizedFiles, tc.input, language, `${jobId}_s${idx}`, null, mainFile);
-          const passed = run.statusId === 3 && run.stdout.trim() === tc.output.trim();
-          return { 
-            input: tc.input, 
-            expectedOutput: tc.output, 
-            actualOutput: run.stdout,
-            passed: passed,
-            status: run.status
-          };
-        }));
- 
-        const hiddenCases = problem.testCases.filter(tc => !tc.isSample);
-        const hiddenResults = await Promise.all(hiddenCases.map(async (tc, i) => {
-          const run = await executeJudge0(normalizedFiles, tc.input, language, `${jobId}_h${i}`, null, mainFile);
-          const passed = run.statusId === 3 && run.stdout.trim() === tc.output.trim();
-          return { passed, status: run.status };
-        }));
-        const hiddenPassed = hiddenResults.filter(r => r.passed).length;
+        // SUBMIT MODE
+        const allTestCases = problem.testCases;
+        const sampleCases = allTestCases.filter(tc => tc.isSample);
+        const hiddenCases = allTestCases.filter(tc => !tc.isSample);
 
-        // Determine final status
-        let status = 'Accepted';
-        if (mainResult.statusId !== 3) {
-            status = mainResult.status === 'Compilation Error' ? 'Compilation Error' : 'Rejected';
-        } else {
-            const firstFailedSample = sampleResults.find(r => !r.passed);
-            if (firstFailedSample) {
-                status = 'Rejected';
-            } else {
-                const firstFailedHidden = hiddenResults.find(r => !r.passed);
-                if (firstFailedHidden) {
-                    status = 'Rejected';
-                }
-            }
-        }
-        
-        const totalPassed = sampleResults.filter(r => r.passed).length + hiddenPassed;
-        const totalTestCases = problem.testCases.length;
-        const earnedPoints = totalTestCases > 0 ? (totalPassed / totalTestCases) * (problem.points || 100) : 0;
-        
-        const detailedResults = { 
-            sampleCases: sampleResults, 
-            hidden: { passed: hiddenPassed, total: hiddenCases.length, results: hiddenResults }, 
+        const results = await executeCodeArena(normalizedFiles, allTestCases, language, true);
+
+        let finalStatus = 'Accepted';
+        let totalExecutionTime = 0;
+        let maxMemory = 0;
+        let totalPassed = 0;
+
+        const sampleResults = [];
+        const hiddenResults = [];
+
+        allTestCases.forEach((tc, idx) => {
+            const res = results[idx] || { executionTime: 0, memoryUsed: 0, passed: false };
+            totalExecutionTime += res.executionTime;
+            maxMemory = Math.max(maxMemory, res.memoryUsed);
+            
+            if (res.passed) totalPassed++;
+            else if (finalStatus === 'Accepted') finalStatus = 'Wrong Answer';
+
+            const outputObj = {
+                input: tc.input,
+                expectedOutput: tc.output,
+                passed: res.passed,
+                status: res.passed ? 'Accepted' : 'Wrong Answer'
+            };
+
+            if (tc.isSample) sampleResults.push(outputObj);
+            else hiddenResults.push({ passed: res.passed, status: outputObj.status });
+        });
+
+        const earnedPoints = allTestCases.length > 0 ? (totalPassed / allTestCases.length) * (problem.points || 100) : 0;
+
+        const detailedResults = {
+            sampleCases: sampleResults,
+            hidden: { passed: hiddenResults.filter(r => r.passed).length, total: hiddenCases.length, results: hiddenResults },
             points: earnedPoints,
-            totalTestCases,
+            totalTestCases: allTestCases.length,
             totalPassed,
-            ...mainResult,
-            status
+            executionTime: totalExecutionTime,
+            memoryUsed: maxMemory,
+            status: finalStatus
         };
 
         await Submission.findByIdAndUpdate(submissionId, {
-            status,
+            status: finalStatus,
             results: detailedResults,
             points: earnedPoints,
             files: normalizedFiles,
-            executionTime: mainResult.executionTime,
-            memoryUsed: mainResult.memoryUsed
+            executionTime: totalExecutionTime,
+            memoryUsed: maxMemory
         });
 
         return { submissionId, results: detailedResults };
@@ -295,12 +339,7 @@ const worker = new Worker('submission-queue', async (job) => {
   }
 }, { connection });
 
-worker.on('completed', job => {
-  console.log(`Job ${job.id} completed`);
-});
-
-worker.on('failed', (job, err) => {
-  console.error(`Job ${job.id} failed:`, err);
-});
+worker.on('completed', job => console.log(`Job ${job.id} completed`));
+worker.on('failed', (job, err) => console.error(`Job ${job.id} failed:`, err));
 
 console.log('Worker is running...');
