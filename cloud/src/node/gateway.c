@@ -110,6 +110,7 @@ napi_value Init(napi_env env, napi_callback_info info);
 napi_value OnMessage(napi_env env, napi_callback_info info);
 napi_value OnIdeMessage(napi_env env, napi_callback_info info);
 napi_value OnDrain(napi_env env, napi_callback_info info);
+napi_value OnIdeDrain(napi_env env, napi_callback_info info);
 napi_value CreateTask(napi_env env, napi_callback_info info);
 
 void sendDiscoveryPacket();
@@ -151,6 +152,46 @@ void callCb(napi_env env, napi_value func, void *context, void *data) {
 	napi_create_int32(env, *taskID, &taskIDValue);
 	napi_call_function(env, global, func, 1, &taskIDValue, NULL);
 	free(taskID);
+}
+
+void callIdeMessageCb(napi_env env, napi_value func, void *context, void *data) {
+	struct MessageCbData *messageData = (struct MessageCbData *)data;
+
+	if (env == NULL || func == NULL) {
+		free(messageData->data);
+		free(messageData);
+		return;
+	}
+
+	napi_value buffer;
+	uint8_t *buffer_data;
+	napi_status status = napi_create_buffer(env, messageData->data_size,
+											(void **)&buffer_data, &buffer);
+	if (status != napi_ok) {
+		printNapiError(env, "callIdeMessageCb buffer");
+		free(messageData->data);
+		free(messageData);
+		return;
+	}
+
+	memcpy(buffer_data, messageData->data, messageData->data_size);
+
+	napi_value global = getNapiGlobal(env);
+	napi_value result;
+	napi_call_function(env, global, func, 1, &buffer, &result);
+
+	napi_valuetype var_type;
+	if (napi_typeof(env, result, &var_type) == napi_ok &&
+		var_type == napi_boolean) {
+		bool wsFilled;
+		if (napi_get_value_bool(env, result, &wsFilled) == napi_ok &&
+			wsFilled == 1) {
+			uv_poll_stop(&global_ide_assigner_poll);
+		}
+	}
+
+	free(messageData->data);
+	free(messageData);
 }
 
 void callMessageCb(napi_env env, napi_value func, void *context, void *data) {
@@ -298,10 +339,11 @@ napi_value Start(napi_env env, napi_value exports) {
 					 accept_ide_assigner_fd, UV_READABLE,
 					 handle_accept_ide_assigner_fd, NULL);
 
-	napi_value OnMessageFN, OnIdeMessageFN, OnDrainFN, CreateTaskFN, InitFN;
+	napi_value OnMessageFN, OnIdeMessageFN, OnIdeDrainFN, OnDrainFN, CreateTaskFN, InitFN;
 	napi_create_function(env, "createTask", 11, CreateTask, NULL,
 						 &CreateTaskFN);
 	napi_create_function(env, "onDrain", 8, OnDrain, NULL, &OnDrainFN);
+	napi_create_function(env, "onIdeDrain", 10, OnIdeDrain, NULL, &OnIdeDrainFN);
 	napi_create_function(env, "onMessage", 10, OnMessage, NULL, &OnMessageFN);
 	napi_create_function(env, "onIdeMessage", 13, OnIdeMessage, NULL,
 						 &OnIdeMessageFN);
@@ -309,6 +351,7 @@ napi_value Start(napi_env env, napi_value exports) {
 
 	napi_set_named_property(env, exports, "createTasks", CreateTaskFN);
 	napi_set_named_property(env, exports, "onDrain", OnDrainFN);
+	napi_set_named_property(env, exports, "onIdeDrain", OnIdeDrainFN);
 	napi_set_named_property(env, exports, "onMessage", OnMessageFN);
 	napi_set_named_property(env, exports, "onIdeMessage", OnIdeMessageFN);
 	napi_set_named_property(env, exports, "init", InitFN);
@@ -845,6 +888,17 @@ napi_value OnMessage(napi_env env, napi_callback_info info) {
 	}
 
 	return napiBool(env, 0);
+}
+
+napi_value OnIdeDrain(napi_env env, napi_callback_info info) {
+	if (global_ide_assigner_fd != -1) {
+		if (uv_poll_start(&global_ide_assigner_poll, UV_READABLE,
+						  handle_ide_assigner_fd) < 0) {
+			printc(RED, "Gateway - OnIdeDrain",
+				   "Failed to start polling ide assigner fd\n");
+		}
+	}
+	return napiUndefined(env);
 }
 
 napi_value OnDrain(napi_env env, napi_callback_info info) {

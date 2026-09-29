@@ -65,6 +65,16 @@ wss.on("connection", (ws) => {
 		},
 		(ide_buffer) => {
 			ws.send(JSON.stringify({ type: 2, data: Array.from(ide_buffer) }));
+			if (ws.bufferedAmount > WS_CAPACITY) {
+				const interval = setInterval(() => {
+					if (ws.bufferedAmount < WS_CAPACITY) {
+						cG.onIdeDrain();
+						clearInterval(interval);
+					}
+				}, 10);
+				return true;
+			}
+			return false;
 		}
 	);
 
@@ -87,7 +97,8 @@ wss.on("connection", (ws) => {
 				typeof obj.type == "number"
 			) {
 				if (obj.type == 1) {
-					if (cG.onMessage(message, taskID, obj.type)) {
+					const buf = Buffer.from(obj.data);
+					if (cG.onMessage(buf, taskID, obj.type)) {
 						ws.pause();
 					}
 				} else if (obj.type == 2) {
