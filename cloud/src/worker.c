@@ -65,7 +65,9 @@ int getContainerTaskID(int fd);
 struct IntermediateBuffer *getNodeIB(int fd);
 struct IntermediateBuffer *getIB();
 void sendTaskOverPacket(int fd);
-void createContainer(struct TaskDetail *t, int taskID);
+void setupOverlayFS(struct TaskDetail *t, int taskID);
+void spawnTerminalContainer(struct TaskDetail *t, int taskID);
+void spawnCommandContainer(struct TaskDetail *t, int taskID);
 void writeToPath(char *map_buf, int pid, char *path);
 void cleanUpTasks();
 void sendHeartbeat();
@@ -85,6 +87,7 @@ void handle_crash(int sig, siginfo_t *info, void *context);
 void setup_signals();
 
 void handle_container(struct socketDetails *sd);
+void handle_command_fd(struct socketDetails *sd);
 void handle_timer_fd(struct socketDetails *sd);
 void handle_role_fd(struct socketDetails *sd);
 void handle_assigner_fd(struct socketDetails *sd);
@@ -110,6 +113,8 @@ int main(int argc, char const *argv[]) {
 		taskList[i].bottom_buf_ptr = -1;
 		taskList[i].top_buf_ptr = -1;
 		taskList[i].bottom_sd = NULL;
+		taskList[i].command_fd = -1;
+		taskList[i].command_sd = NULL;
 		taskList[i].top_sd = NULL;
 	}
 	ideTaskList = amalloc(&arena, taskListSize);
@@ -118,6 +123,8 @@ int main(int argc, char const *argv[]) {
 		ideTaskList[i].bottom_buf_ptr = -1;
 		ideTaskList[i].top_buf_ptr = -1;
 		ideTaskList[i].bottom_sd = NULL;
+		ideTaskList[i].command_fd = -1;
+		ideTaskList[i].command_sd = NULL;
 		ideTaskList[i].top_sd = NULL;
 	}
 	intermediateBufferList = amalloc(&arena, intermediateBufferListSize);
@@ -297,8 +304,14 @@ void handle_container(struct socketDetails *sd) {
 				struct TaskDetail *t = &taskList[i];
 				t->lastConnected = getCurrTime();
 				int required = t->top_filled - t->top_buf_ptr;
-				int sent =
-					write(t->bottom_fd, t->top_buf + t->top_buf_ptr, required);
+				struct io_packet *buffered_iop = (struct io_packet *)t->top_buf;
+				int target_fd =
+					(buffered_iop->type == 1) ? t->command_fd : t->bottom_fd;
+				int sent = 0;
+				if (target_fd != -1) {
+					sent =
+						write(target_fd, t->top_buf + t->top_buf_ptr, required);
+				}
 
 				if (sent < required) {
 					t->top_buf_ptr += max(sent, 0);
@@ -343,7 +356,9 @@ void handle_container(struct socketDetails *sd) {
 								continue;
 							}
 
-							createContainer(&taskList[tp->taskID], tp->taskID);
+							setupOverlayFS(&taskList[tp->taskID], tp->taskID);
+							spawnTerminalContainer(&taskList[tp->taskID],
+												   tp->taskID);
 						} else if (done == ERROR || done == UNKNOWN) {
 							break;
 						}
@@ -632,17 +647,35 @@ void handle_assigner_fd(struct socketDetails *sd) {
 
 				if (done == YES) {
 					printc(INFO, "worker - handle_assigner_fd",
-						   "IO Packet, task: %d\n", iop->task_ID);
+						   "IO Packet, task: %d, type: %d\n", iop->task_ID,
+						   iop->type);
 					struct TaskDetail *t = &taskList[iop->task_ID];
 					t->lastConnected = getCurrTime();
-					int sent =
-						write(t->bottom_fd, iop->data,
-							  ib->filled - (iop_size - MAX_DATA_CAPACITY));
+
+					int target_fd = -1;
+					if (iop->type == 1) {
+						if (t->command_fd == -1) {
+							spawnCommandContainer(t, iop->task_ID);
+						}
+						target_fd = t->command_fd;
+					} else {
+						target_fd = t->bottom_fd;
+					}
+
+					int sent = 0;
+					if (target_fd != -1) {
+						sent =
+							write(target_fd, iop->data,
+								  ib->filled - (iop_size - MAX_DATA_CAPACITY));
+					}
 
 					if (sent < ib->filled - (iop_size - MAX_DATA_CAPACITY)) {
 						t->top_buf_ptr = max(sent, 0);
 						memcpy(&t->top_buf, iop, ib->filled);
 						t->bottom_filled = ib->filled;
+						// To keep track of where this top_buf goes upon
+						// EPOLLOUT, the type is preserved inside iop->type
+						// which is now inside top_buf.
 
 						modifyFDInEpoll(sd->fd, EPOLL_DESTROY | EPOLL_OUT, sd);
 
@@ -668,7 +701,8 @@ void handle_assigner_fd(struct socketDetails *sd) {
 						continue;
 					}
 
-					createContainer(&taskList[tp->taskID], tp->taskID);
+					setupOverlayFS(&taskList[tp->taskID], tp->taskID);
+					spawnTerminalContainer(&taskList[tp->taskID], tp->taskID);
 				} else if (done == ERROR || done == UNKNOWN) {
 					break;
 				}
@@ -767,7 +801,8 @@ void handle_task_fd(struct socketDetails *sd) {
 				addr->sin_port = old_port;
 
 				// create a new container
-				createContainer(&taskList[tp->taskID], tp->taskID);
+				setupOverlayFS(&taskList[tp->taskID], tp->taskID);
+				spawnTerminalContainer(&taskList[tp->taskID], tp->taskID);
 
 				printc(INFO, "worker - handle_task_fd",
 					   "container creation done for: %d", tp->taskID);
@@ -866,6 +901,27 @@ void handleInotifyWd(struct socketDetails *sd) {
 
 void handle_ide_assigner_fd(struct socketDetails *sd) {
 	struct IntermediateBuffer *ib = (struct IntermediateBuffer *)sd->data;
+
+	if (sd->events & EPOLLOUT) {
+		for (int i = 0; i < taskListLength; i++) {
+			if (ideTaskList[i].filled == 1 && ideTaskList[i].top_fd == sd->fd &&
+				ideTaskList[i].bottom_buf_ptr != -1) {
+				struct TaskDetail *t = &ideTaskList[i];
+				int required = t->bottom_filled - t->bottom_buf_ptr;
+				int sent = send(t->top_fd, t->bottom_buf + t->bottom_buf_ptr,
+								required, 0);
+
+				if (sent < required) {
+					t->bottom_buf_ptr += max(sent, 0);
+					return;
+				}
+
+				t->bottom_buf_ptr = -1;
+				modifyFDInEpoll(sd->fd, EPOLL_DESTROY | EPOLL_IN, sd);
+			}
+		}
+	}
+
 	if (sd->events & EPOLLIN) {
 		while (1) {
 			int done = getPacketData(sd->fd, ib->buf, &ib->buf_ptr,
@@ -938,7 +994,14 @@ void send_ide_packet(int taskID, int event, const char *path,
 	if (data && data_size > 0)
 		memcpy(idep->data, data, data_size);
 
-	send(ideTaskList[taskID].top_fd, idep, idep_size, 0);
+	struct TaskDetail *t = &ideTaskList[taskID];
+	int sent = send(t->top_fd, idep, idep_size, 0);
+	if (sent < idep_size) {
+		t->bottom_buf_ptr = max(sent, 0);
+		memcpy(&t->bottom_buf, idep, idep_size);
+		t->bottom_filled = idep_size;
+		modifyFDInEpoll(t->top_fd, EPOLL_DESTROY | EPOLL_OUT, t->top_sd);
+	}
 }
 
 void killContainer(int fd) {
@@ -1012,81 +1075,51 @@ void sendTaskOverPacket(int fd) {
 	}
 }
 
-void createContainer(struct TaskDetail *t, int taskID) {
-	printc(INFO, "worker - createContainer",
-		   "Creating container for task: %d\n", tp->taskID);
-	int master_fd = posix_openpt(O_RDWR | O_NOCTTY);
-	if (master_fd < 0) {
-		printc(RED, "container - createTerminal", "master_fd failed\n");
-		perror("master_fd");
-		return;
-	}
-
-	grantpt(master_fd);
-	unlockpt(master_fd);
-
-	char *slave_name = ptsname(master_fd);
-
-	int slave_fd = open(slave_name, O_RDWR);
-
-	uid_t uid = getuid();
-	gid_t gid = getgid();
-
-	// allocate the stack
-	uint8_t *stack = malloc(sizeof(uint8_t) * CONTAINER_STACK_SIZE);
+void setupOverlayFS(struct TaskDetail *t, int taskID) {
+	printc(INFO, "worker - setupOverlayFS",
+		   "Setting up OverlayFS for task: %d\n", taskID);
 
 	char *path[13];
 	memset(path, 0, 13);
-	snprintf(path, 13, "/tmp/ca/u-%d", taskID);
-	mkdir(path, 0755);
+	snprintf((char *)path, 13, "/tmp/ca/u-%d", taskID);
+	mkdir((char *)path, 0755);
 	memset(path, 0, 13);
-	snprintf(path, 13, "/tmp/ca/w-%d", taskID);
-	mkdir(path, 0755);
+	snprintf((char *)path, 13, "/tmp/ca/w-%d", taskID);
+	mkdir((char *)path, 0755);
 	memset(path, 0, 13);
-	snprintf(path, 13, "/tmp/ca/t-%d", taskID);
-	mkdir(path, 0777);
-	chdir(path);
+	snprintf((char *)path, 13, "/tmp/ca/t-%d", taskID);
+	mkdir((char *)path, 0777);
 
 	char *options[74];
 	memset(options, 0, 74);
-	snprintf(options, 74,
+	snprintf((char *)options, 74,
 			 "lowerdir=/var/lib/ubuntu-base,upperdir=/tmp/ca/u-%d,workdir=/tmp/"
 			 "ca/w-%d",
 			 taskID, taskID);
 
-	if (mount("overlay", path, "overlay", 0, options) == -1) {
-		printc(ERR, "worker - createContainer",
-			   "Could not mount the OverlayFS");
-		close(slave_fd);
-		close(master_fd);
+	if (mount("overlay", (char *)path, "overlay", 0, (char *)options) == -1) {
+		printc(ERR, "worker - setupOverlayFS", "Could not mount the OverlayFS");
 		perror("overlay");
 		return;
 	}
 
 	int inotifyFd = inotify_init1(IN_NONBLOCK);
-
-	int wd = inotify_add_watch(inotifyFd, path,
+	int wd = inotify_add_watch(inotifyFd, (char *)path,
 							   IN_MOVED_FROM | IN_MOVED_TO | IN_DELETE |
 								   IN_CLOSE_WRITE);
 
 	if (wd < 0) {
-		printc(ERR, "worker - createContainer",
+		printc(ERR, "worker - setupOverlayFS",
 			   "Failed to add inotify watch descriptor\n");
-		close(slave_fd);
-		close(master_fd);
 		perror("inotify_add_watch");
 		return;
 	}
 
 	struct InotifyDetails *iD = amalloc(&arena, sizeof(struct InotifyDetails));
 	iD->taskID = taskID;
-	// this code is not reachable, but kept in case of rare kernel memory fill
-	// up bugs
 	if (add_wd(iD, inotifyFd, wd, "/") == NO) {
-		printc(ERR, "worker - createContainer",
+		printc(ERR, "worker - setupOverlayFS",
 			   "Failed to add inotify new watch descriptor\n");
-		close(slave_fd);
-		close(master_fd);
 		inotify_rm_watch(inotifyFd, wd);
 		perror("add_wd");
 		return;
@@ -1098,19 +1131,43 @@ void createContainer(struct TaskDetail *t, int taskID) {
 	wdSd->events = 0;
 	wdSd->data = iD;
 	addFDToEpoll(inotifyFd, EPOLLOUT | EPOLLIN | EPOLLERR, wdSd);
+}
 
-	printc(INFO, "worker - createContainer", "cloning\n");
+void spawnTerminalContainer(struct TaskDetail *t, int taskID) {
+	printc(INFO, "worker - spawnTerminalContainer",
+		   "Creating container for task: %d\n", taskID);
+	int master_fd = posix_openpt(O_RDWR | O_NOCTTY);
+	if (master_fd < 0) {
+		printc(RED, "worker - spawnTerminalContainer", "master_fd failed\n");
+		perror("master_fd");
+		return;
+	}
+
+	grantpt(master_fd);
+	unlockpt(master_fd);
+
+	char *slave_name = ptsname(master_fd);
+	int slave_fd = open(slave_name, O_RDWR);
+
+	uid_t uid = getuid();
+	gid_t gid = getgid();
+
+	uint8_t *stack = malloc(sizeof(uint8_t) * CONTAINER_STACK_SIZE);
+	char path[13];
+	snprintf(path, 13, "/tmp/ca/t-%d", taskID);
+	chdir(path);
+
+	printc(INFO, "worker - spawnTerminalContainer", "cloning\n");
 
 	int container_pid = clone(&run_container, stack + CONTAINER_STACK_SIZE,
 							  CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID |
 								  CLONE_NEWUTS | SIGCHLD,
 							  &slave_fd);
 
-	printc(INFO, "worker - createContainer", "clone successful\n");
+	printc(INFO, "worker - spawnTerminalContainer", "clone successful\n");
 
 	if (container_pid == -1) {
-		// the container was not created
-		printc(ERR, "worker - createContainer",
+		printc(ERR, "worker - spawnTerminalContainer",
 			   "Could not create the container\n");
 		close(slave_fd);
 		close(master_fd);
@@ -1120,9 +1177,7 @@ void createContainer(struct TaskDetail *t, int taskID) {
 
 	close(slave_fd);
 
-	// now write uid_map, gid_map and deny path
 	char map_buf[64];
-
 	snprintf(map_buf, sizeof(map_buf), "0 %d 1", uid);
 	writeToPath(map_buf, container_pid, "uid_map");
 	snprintf(map_buf, sizeof(map_buf), "deny");
@@ -1132,11 +1187,68 @@ void createContainer(struct TaskDetail *t, int taskID) {
 
 	t->bottom_fd = master_fd;
 	t->bottom_sd->fd = master_fd;
-	printc(INFO, "worker - createContainer", "container fd: %d\n", master_fd);
 	setNonBlocking(t->bottom_fd);
 	addFDToEpoll(master_fd, EPOLL_OUT | EPOLLIN | EPOLL_DESTROY, t->bottom_sd);
+	printc(INFO, "worker - spawnTerminalContainer",
+		   "Terminal Container created\n");
+}
 
-	printc(INFO, "worker - createContainer", "Container created\n");
+void spawnCommandContainer(struct TaskDetail *t, int taskID) {
+	printc(INFO, "worker - spawnCommandContainer",
+		   "Creating ephemeral container for task: %d\n", taskID);
+	int master_fd = posix_openpt(O_RDWR | O_NOCTTY);
+	if (master_fd < 0) {
+		printc(RED, "worker - spawnCommandContainer", "master_fd failed\n");
+		return;
+	}
+
+	grantpt(master_fd);
+	unlockpt(master_fd);
+
+	char *slave_name = ptsname(master_fd);
+	int slave_fd = open(slave_name, O_RDWR);
+
+	uid_t uid = getuid();
+	gid_t gid = getgid();
+
+	uint8_t *stack = malloc(sizeof(uint8_t) * CONTAINER_STACK_SIZE);
+	char path[13];
+	snprintf(path, 13, "/tmp/ca/t-%d", taskID);
+	chdir(path);
+
+	int container_pid = clone(&run_container, stack + CONTAINER_STACK_SIZE,
+							  CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID |
+								  CLONE_NEWUTS | SIGCHLD,
+							  &slave_fd);
+
+	if (container_pid == -1) {
+		printc(ERR, "worker - spawnCommandContainer",
+			   "Could not create ephemeral container\n");
+		close(slave_fd);
+		close(master_fd);
+		return;
+	}
+
+	close(slave_fd);
+
+	char map_buf[64];
+	snprintf(map_buf, sizeof(map_buf), "0 %d 1", uid);
+	writeToPath(map_buf, container_pid, "uid_map");
+	snprintf(map_buf, sizeof(map_buf), "deny");
+	writeToPath(map_buf, container_pid, "setgroups");
+	snprintf(map_buf, sizeof(map_buf), "0 %d 1", gid);
+	writeToPath(map_buf, container_pid, "gid_map");
+
+	t->command_fd = master_fd;
+	t->command_sd = amalloc(&arena, sizeof(struct socketDetails));
+	t->command_sd->fd = master_fd;
+	t->command_sd->data = (void *)(long)taskID;
+	t->command_sd->handler = handle_command_fd;
+	t->command_sd->events = 0;
+	setNonBlocking(t->command_fd);
+	addFDToEpoll(master_fd, EPOLL_OUT | EPOLLIN | EPOLL_DESTROY, t->command_sd);
+	printc(INFO, "worker - spawnCommandContainer",
+		   "Command Container created\n");
 }
 
 int add_wd(struct InotifyDetails *iD, int inotifyFd, int wd, char *path) {
@@ -1274,6 +1386,8 @@ int addToTaskList(int taskID, int assigner_fd, struct sockaddr *given_addr) {
 	taskList[taskID].lastConnected = getCurrTime();
 	taskList[taskID].top_buf_ptr = -1;
 	taskList[taskID].bottom_buf_ptr = -1;
+	taskList[taskID].command_fd = -1;
+	taskList[taskID].command_sd = NULL;
 	if (assigner_fd < 0) {
 		int fd = socket(AF_INET, SOCK_STREAM, 0);
 		if (fd == -1) {
@@ -1423,5 +1537,70 @@ int requestTCPConnection(int fd, struct sockaddr_in *given_addr, void *data) {
 			   "unknown impossible response: %d, errno: %d\n", res, errno);
 		close(fd);
 		return EXIT_FAILURE;
+	}
+}
+
+void handle_command_fd(struct socketDetails *sd) {
+	int events = sd->events;
+	int taskID = (int)(long)sd->data;
+	struct TaskDetail *t = &taskList[taskID];
+
+	if (events & EPOLLIN) {
+		struct IntermediateBuffer *ib = getNodeIB(sd->fd);
+		if (ib->buf_ptr != 0 && ib->buf_ptr != MAX_DATA_CAPACITY) {
+			printc(ERR, "worker - handle_command_fd", "buf_ptr is not 0: %d\n",
+				   ib->buf_ptr);
+		}
+
+		while (1) {
+			int required = MAX_DATA_CAPACITY - ib->buf_ptr;
+			if (required == 0) {
+				printc(ERR, "worker - handle_command_fd", "Buffer full\n");
+				break;
+			}
+
+			int recved = read(sd->fd, ib->buf + ib->buf_ptr, required);
+			if (recved == 0) {
+				printc(INFO, "worker - handle_command_fd",
+					   "Command container closed\n");
+				deleteFDInEpoll(sd->fd);
+				close(sd->fd);
+				t->command_fd = -1;
+				t->command_sd = NULL;
+				break;
+			} else if (recved == -1 &&
+					   (errno == EWOULDBLOCK || errno == EAGAIN)) {
+				break;
+			} else if (recved == -1) {
+				perror("read command_fd");
+				break;
+			}
+
+			ib->buf_ptr += recved;
+			ib->filled = ib->buf_ptr;
+
+			iop->packet_ID = PACKET_ID;
+			iop->packet_type = IO_PACKET;
+			iop->node_type = WORKER_NODE;
+			iop->UID = UID;
+			iop->task_ID = taskID;
+			iop->type = 1;
+			iop->last = 1;
+			iop->data_size = ib->filled;
+			memcpy(iop->data, ib->buf, ib->filled);
+
+			int packetSize = iop_size - MAX_DATA_CAPACITY + ib->filled;
+			int sent = send(t->top_fd, iop, packetSize, 0);
+
+			if (sent < packetSize) {
+				memcpy(&t->bottom_buf, iop, packetSize);
+				t->bottom_buf_ptr = max(sent, 0);
+				t->bottom_filled = packetSize;
+				modifyFDInEpoll(t->top_sd->fd, EPOLL_OUT | EPOLL_DESTROY,
+								t->top_sd);
+				break;
+			}
+			ib->buf_ptr = 0;
+		}
 	}
 }

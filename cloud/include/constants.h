@@ -291,6 +291,8 @@ struct TaskDetail {
 	int bottom_fd;
 	struct socketDetails *top_sd;
 	struct socketDetails *bottom_sd;
+	int command_fd;
+	struct socketDetails *command_sd;
 	uint8_t bottom_buf[sizeof(struct io_packet)];
 	int bottom_buf_ptr;
 	int bottom_filled;
