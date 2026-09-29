@@ -330,16 +330,16 @@ struct MonitorRecord {
 	int totalNodes;
 };
 
+struct WatchDescriptor {
+	int wd;
+	char path[MAX_PATH_SIZE];
+};
+
 struct InotifyDetails {
 	int taskID;
 	int inotifyFd;
 	uint16_t currInd;
 	struct WatchDescriptor wds[MAX_INOTIFY_WATCH_DESCRIPTORS];
-};
-
-struct WatchDescriptor {
-	int wd;
-	char path[MAX_PATH_SIZE];
 };
 
 #endif
