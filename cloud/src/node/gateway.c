@@ -803,7 +803,7 @@ napi_value Init(napi_env env, napi_callback_info info) {
 napi_value OnMessage(napi_env env, napi_callback_info info) {
 	printc(INFO, "gateway - OnMessage", "message\n");
 	napi_status status;
-	size_t argc = 2;
+	size_t argc = 3;
 	napi_value args[argc];
 
 	status = napi_get_cb_info(env, info, &argc, args, NULL, NULL);
@@ -830,6 +830,11 @@ napi_value OnMessage(napi_env env, napi_callback_info info) {
 		return napiUndefined(env);
 	}
 
+	int packet_inner_type = 0;
+	if (argc >= 3) {
+		napi_get_value_int32(env, args[2], &packet_inner_type);
+	}
+
 	struct Task *t = &taskList[taskID];
 
 	status = napi_get_buffer_info(env, args[0], (void *)&t->client_buf,
@@ -850,6 +855,7 @@ napi_value OnMessage(napi_env env, napi_callback_info info) {
 		iop->node_type = GATEWAY_NODE;
 		iop->UID = UID;
 		iop->task_ID = taskID;
+		iop->type = packet_inner_type;
 		int dataSize =
 			min(MAX_DATA_CAPACITY, t->client_buf_size - t->client_buf_ptr);
 		if (dataSize == 0) {
