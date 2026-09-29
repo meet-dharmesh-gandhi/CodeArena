@@ -21,6 +21,8 @@ struct Task {
 	napi_threadsafe_function tsfn_close_cb;
 	napi_ref message_cb;
 	napi_threadsafe_function tsfn_message_cb;
+	napi_ref ide_message_cb;
+	napi_threadsafe_function tsfn_ide_message_cb;
 	napi_env env;
 };
 
@@ -63,7 +65,10 @@ const int addrLen = sizeof(struct sockaddr_in);
 
 time_t monitor_last_shouted;
 
-int discover_fd, find_fd, timer_fd, task_fd, hb_fd, accept_assigner_fd;
+int discover_fd, find_fd, timer_fd, task_fd, hb_fd, accept_assigner_fd,
+	accept_ide_assigner_fd;
+int global_ide_assigner_fd = -1;
+uv_poll_t global_ide_assigner_poll;
 
 uint8_t *buf;
 const int buf_size = LARGEST_PACKET;
@@ -80,6 +85,8 @@ struct heartbeat_packet *hp;
 const int hp_size = sizeof(struct heartbeat_packet);
 struct find_monitor_packet *fmp;
 const int fmp_size = sizeof(struct find_monitor_packet);
+struct ide_packet *idep;
+const int idep_size = sizeof(struct ide_packet);
 
 napi_ref end_cb;
 napi_env end_cb_env;
@@ -97,14 +104,17 @@ void handle_assigner_fd_close(uv_handle_t *handle);
 void handle_find_fd_close(uv_handle_t *handle);
 void handle_find_fd(uv_poll_t *handle, int status, int events);
 void handle_assigner_fd(uv_poll_t *handle, int status, int events);
+void handle_accept_ide_assigner_fd(uv_poll_t *handle, int status, int events);
+void handle_ide_assigner_fd(uv_poll_t *handle, int status, int events);
 napi_value Init(napi_env env, napi_callback_info info);
 napi_value OnMessage(napi_env env, napi_callback_info info);
+napi_value OnIdeMessage(napi_env env, napi_callback_info info);
 napi_value OnDrain(napi_env env, napi_callback_info info);
 napi_value CreateTask(napi_env env, napi_callback_info info);
 
 void sendDiscoveryPacket();
 struct Task *addTask(napi_env env, napi_value cb, napi_value close_cb,
-					 napi_value message_cb);
+					 napi_value message_cb, napi_value ide_message_cb);
 void checkMonitor();
 void sendHeartbeat();
 void removeDeadTasks();
@@ -250,6 +260,8 @@ napi_value Start(napi_env env, napi_value exports) {
 	hb_fd = getNewSocket(HEARTBEAT_PORT, SOCKET_TIMEOUT, SOCK_DGRAM);
 
 	accept_assigner_fd = getNewSocket(TASK_PORT, SOCKET_TIMEOUT, SOCK_STREAM);
+	accept_ide_assigner_fd =
+		getNewSocket(IDE_PORT, SOCKET_TIMEOUT, SOCK_STREAM);
 
 	timer_fd = getNewTimerFD(CLOCK_MONOTONIC, HEARTBEAT_INTERVAL,
 							 HEARTBEAT_INTERVAL, 1);
@@ -260,6 +272,7 @@ napi_value Start(napi_env env, napi_value exports) {
 	iop = malloc(iop_size);
 	fmp = malloc(fmp_size);
 	hp = malloc(hp_size);
+	idep = malloc(idep_size);
 
 	drainSocket(hb_fd, SOCK_DGRAM);
 	drainSocket(find_fd, SOCK_DGRAM);
@@ -280,18 +293,24 @@ napi_value Start(napi_env env, napi_value exports) {
 	addFDToNodeEpoll(node_loop, accept_assigner_poll, accept_assigner_fd,
 					 UV_READABLE, handle_accept_assigner_fd,
 					 handle_accept_assigner_fd_close);
+	uv_poll_t *accept_ide_assigner_poll = malloc(sizeof(uv_poll_t));
+	addFDToNodeEpoll(node_loop, accept_ide_assigner_poll,
+					 accept_ide_assigner_fd, UV_READABLE,
+					 handle_accept_ide_assigner_fd, NULL);
 
-	napi_value OnMessageFN, OnDrainFN, CreateTaskFN, InitFN;
+	napi_value OnMessageFN, OnIdeMessageFN, OnDrainFN, CreateTaskFN, InitFN;
 	napi_create_function(env, "createTask", 11, CreateTask, NULL,
 						 &CreateTaskFN);
 	napi_create_function(env, "onDrain", 8, OnDrain, NULL, &OnDrainFN);
 	napi_create_function(env, "onMessage", 10, OnMessage, NULL, &OnMessageFN);
+	napi_create_function(env, "onIdeMessage", 13, OnIdeMessage, NULL,
+						 &OnIdeMessageFN);
 	napi_create_function(env, "init", 5, Init, NULL, &InitFN);
-	;
 
 	napi_set_named_property(env, exports, "createTasks", CreateTaskFN);
 	napi_set_named_property(env, exports, "onDrain", OnDrainFN);
 	napi_set_named_property(env, exports, "onMessage", OnMessageFN);
+	napi_set_named_property(env, exports, "onIdeMessage", OnIdeMessageFN);
 	napi_set_named_property(env, exports, "init", InitFN);
 	napi_set_named_property(env, exports, "ok", napiBool(env, 1));
 
@@ -651,6 +670,57 @@ void handle_assigner_fd(uv_poll_t *handle, int status, int events) {
 	}
 }
 
+void handle_ide_assigner_fd(uv_poll_t *handle, int status, int events) {
+	if (events & UV_READABLE) {
+		static uint8_t g_buf[sizeof(struct ide_packet) * 2];
+		static int g_buf_ptr = -1;
+
+		while (1) {
+			int done = getPacketData(global_ide_assigner_fd, g_buf, &g_buf_ptr,
+									 (uint8_t *)idep, idep_size);
+			if (done == YES) {
+				struct Task *t = NULL;
+				for (int i = 0; i < taskListLength; i++) {
+					if (taskList[i].filled == 1) {
+						t = &taskList[i];
+						break;
+					}
+				}
+				if (t != NULL) {
+					size_t payload_size =
+						idep_size - offsetof(struct ide_packet, event);
+					struct MessageCbData *messageData =
+						malloc(sizeof(*messageData));
+					messageData->task = t;
+					messageData->data = malloc(payload_size);
+					messageData->data_size = payload_size;
+					memcpy(messageData->data, &idep->event, payload_size);
+					napi_call_threadsafe_function(t->tsfn_ide_message_cb,
+												  messageData,
+												  napi_tsfn_blocking);
+				}
+			} else if (done == ERROR || done == UNKNOWN) {
+				break;
+			}
+		}
+	}
+}
+
+void handle_accept_ide_assigner_fd(uv_poll_t *handle, int status, int events) {
+	while (1) {
+		socklen_t addrLength = addrLen;
+		int res = accept(accept_ide_assigner_fd, addr, &addrLength);
+		if (res < 0)
+			break;
+
+		global_ide_assigner_fd = res;
+		setNonBlocking(global_ide_assigner_fd);
+		addFDToNodeEpoll(handle->loop, &global_ide_assigner_poll,
+						 global_ide_assigner_fd, UV_READABLE,
+						 handle_ide_assigner_fd, NULL);
+	}
+}
+
 napi_value Init(napi_env env, napi_callback_info info) {
 	printc(INFO, "Gateway - Init", "Init started\n");
 	napi_status status;
@@ -819,7 +889,7 @@ napi_value CreateTask(napi_env env, napi_callback_info info) {
 
 	printc(INFO, "gateway - CreateTask", "task created\n");
 	napi_status status;
-	size_t argc = 3;
+	size_t argc = 4;
 	napi_value args[argc];
 	napi_value jsthis;
 
@@ -852,7 +922,13 @@ napi_value CreateTask(napi_env env, napi_callback_info info) {
 		return napiInt32(env, UNKNOWN);
 	}
 
-	struct Task *task = addTask(env, args[0], args[1], args[2]);
+	status = napi_typeof(env, args[3], &value_type);
+	if (status != napi_ok || value_type != napi_function) {
+		printc(RED, "Gateway - CreateTask", "Fourth argument not function\n");
+		return napiInt32(env, UNKNOWN);
+	}
+
+	struct Task *task = addTask(env, args[0], args[1], args[2], args[3]);
 
 	if (task == NULL) {
 		printc(RED, "Gateway - CreateTask", "Task list full\n");
@@ -862,6 +938,35 @@ napi_value CreateTask(napi_env env, napi_callback_info info) {
 	sendFindNodePacket(1);
 
 	return napiInt32(env, task->taskID);
+}
+
+napi_value OnIdeMessage(napi_env env, napi_callback_info info) {
+	napi_status status;
+	size_t argc = 2;
+	napi_value args[argc];
+	status = napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+
+	void *client_buf;
+	size_t client_buf_size;
+	status = napi_get_buffer_info(env, args[0], &client_buf, &client_buf_size);
+
+	int taskID;
+	status = napi_get_value_int32(env, args[1], &taskID);
+
+	memset(idep, 0, idep_size);
+	idep->packet_ID = PACKET_ID;
+	idep->packet_type = htonl(IDE_PACKET);
+	idep->node_type = GATEWAY_NODE;
+	idep->UID = UID;
+
+	size_t payload_size = idep_size - offsetof(struct ide_packet, event);
+	memcpy(&idep->event, client_buf, min(client_buf_size, payload_size));
+
+	if (global_ide_assigner_fd != -1) {
+		send(global_ide_assigner_fd, idep, idep_size, 0);
+	}
+
+	return napiBool(env, 1);
 }
 
 // -------------------- UTILS --------------------
@@ -883,7 +988,7 @@ void sendDiscoveryPacket() {
 }
 
 struct Task *addTask(napi_env env, napi_value cb, napi_value close_cb,
-					 napi_value message_cb) {
+					 napi_value message_cb, napi_value ide_message_cb) {
 	for (int i = 0; i < taskListLength; i++) {
 		if (taskList[i].filled == 0) {
 			napi_status status;
@@ -942,6 +1047,20 @@ struct Task *addTask(napi_env env, napi_value cb, napi_value close_cb,
 				printNapiError(env, "Gatway - addTask - message_cb");
 				return NULL;
 			}
+
+			napi_create_string_utf8(env, "ideMessageCB", NAPI_AUTO_LENGTH,
+									&resource_name);
+			napi_create_threadsafe_function(
+				env, ide_message_cb, NULL, resource_name, 0, 1, NULL, NULL,
+				NULL, callMessageCb, &taskList[i].tsfn_ide_message_cb);
+			status = napi_create_reference(env, ide_message_cb, 1,
+										   &taskList[i].ide_message_cb);
+			if (status != napi_ok) {
+				taskList[i].filled = 0;
+				printNapiError(env, "Gatway - addTask - ide_message_cb");
+				return NULL;
+			}
+
 			taskList[i].env = env;
 			return &taskList[i];
 		}
