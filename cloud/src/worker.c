@@ -85,6 +85,9 @@ void handle_sigterm(int signum);
 void handle_exit_fd(struct socketDetails *sd);
 void handle_crash(int sig, siginfo_t *info, void *context);
 void setup_signals();
+void send_ide_packet(int taskID, int event, const char *path,
+					 const char *new_path, uint8_t *data, int data_size);
+int add_wd(struct InotifyDetails *iD, int inotifyFd, int wd, char *path);
 
 void handle_container(struct socketDetails *sd);
 void handle_command_fd(struct socketDetails *sd);

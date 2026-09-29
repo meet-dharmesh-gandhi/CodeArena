@@ -110,8 +110,16 @@ struct termios raw, orig;
 int createFile(int slave_fd, uint8_t *buf, char *filename);
 void connectFD(int source_fd, int target_fd);
 void createTerminal();
+void readField(int required, int slave_fd, char *fieldName, void *saveBuf);
 void toRaw(int fd);
 void toOrig(int fd);
+int test_mode(void *arg);
+int submit_mode(void *arg);
+int setup_mode(void *arg);
+int terminal_mode(void *arg);
+void runInput(int slave_fd, uint8_t time_limit, uint32_t memory_limit,
+			  char *command, int mode, void *log_buffer,
+			  size_t *outputs_filled);
 
 int run_container(void *arg) {
 	int slave_fd = *(int *)arg;

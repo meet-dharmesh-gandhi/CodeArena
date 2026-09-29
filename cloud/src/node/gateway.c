@@ -154,7 +154,8 @@ void callCb(napi_env env, napi_value func, void *context, void *data) {
 	free(taskID);
 }
 
-void callIdeMessageCb(napi_env env, napi_value func, void *context, void *data) {
+void callIdeMessageCb(napi_env env, napi_value func, void *context,
+					  void *data) {
 	struct MessageCbData *messageData = (struct MessageCbData *)data;
 
 	if (env == NULL || func == NULL) {
@@ -339,11 +340,13 @@ napi_value Start(napi_env env, napi_value exports) {
 					 accept_ide_assigner_fd, UV_READABLE,
 					 handle_accept_ide_assigner_fd, NULL);
 
-	napi_value OnMessageFN, OnIdeMessageFN, OnIdeDrainFN, OnDrainFN, CreateTaskFN, InitFN;
+	napi_value OnMessageFN, OnIdeMessageFN, OnIdeDrainFN, OnDrainFN,
+		CreateTaskFN, InitFN;
 	napi_create_function(env, "createTask", 11, CreateTask, NULL,
 						 &CreateTaskFN);
 	napi_create_function(env, "onDrain", 8, OnDrain, NULL, &OnDrainFN);
-	napi_create_function(env, "onIdeDrain", 10, OnIdeDrain, NULL, &OnIdeDrainFN);
+	napi_create_function(env, "onIdeDrain", 10, OnIdeDrain, NULL,
+						 &OnIdeDrainFN);
 	napi_create_function(env, "onMessage", 10, OnMessage, NULL, &OnMessageFN);
 	napi_create_function(env, "onIdeMessage", 13, OnIdeMessage, NULL,
 						 &OnIdeMessageFN);
@@ -1005,13 +1008,25 @@ napi_value OnIdeMessage(napi_env env, napi_callback_info info) {
 	size_t argc = 2;
 	napi_value args[argc];
 	status = napi_get_cb_info(env, info, &argc, args, NULL, NULL);
+	if (status != napi_ok) {
+		printc(RED, "Gateway - OnIdeMessage", "Could not pass arguments\n");
+		return napiInt32(env, UNKNOWN);
+	}
 
 	void *client_buf;
 	size_t client_buf_size;
 	status = napi_get_buffer_info(env, args[0], &client_buf, &client_buf_size);
+	if (status != napi_ok) {
+		printc(RED, "Gateway - OnIdeMessage", "First argument not function\n");
+		return napiInt32(env, UNKNOWN);
+	}
 
 	int taskID;
 	status = napi_get_value_int32(env, args[1], &taskID);
+	if (status != napi_ok) {
+		printc(RED, "Gateway - OnIdeMessage", "Second argument not function\n");
+		return napiInt32(env, UNKNOWN);
+	}
 
 	memset(idep, 0, idep_size);
 	idep->packet_ID = PACKET_ID;
