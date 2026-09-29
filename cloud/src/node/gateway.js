@@ -63,7 +63,11 @@ wss.on("connection", (ws) => {
 
 			return false;
 		},
+		(ide_buffer) => {
+			ws.send(JSON.stringify({ type: 2, data: Array.from(ide_buffer) }));
+		}
 	);
+
 	if (taskID < 0) {
 		ws.close(404);
 	} else {
@@ -71,11 +75,37 @@ wss.on("connection", (ws) => {
 		console.log("connection");
 	}
 
+	// type - 0 = terminal
+	// type - 1 = command
 	ws.on("message", (message) => {
 		console.log("message:", message);
-		// tell c that a new message has arrived
-		if (cG.onMessage(message, taskID)) {
-			ws.pause();
+		try {
+			const obj = JSON.parse(message);
+			if (
+				Object.hasOwn(obj, "type") &&
+				Object.hasOwn(obj, "data") &&
+				typeof obj.type == "number"
+			) {
+				if (obj.type == 1) {
+					if (cG.onMessage(message, taskID, obj.type)) {
+						ws.pause();
+					}
+				} else if (obj.type == 2) {
+					const buf = Buffer.from(obj.data);
+					if (cG.onIdeMessage(buf, taskID)) {
+						ws.pause();
+					}
+				} else {
+					throw Error();
+				}
+			} else {
+				throw Error();
+			}
+		} catch (error) {
+			// tell c that a new message has arrived
+			if (cG.onMessage(message, taskID, 0)) {
+				ws.pause();
+			}
 		}
 	});
 });
