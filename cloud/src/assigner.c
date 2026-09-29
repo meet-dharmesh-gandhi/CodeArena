@@ -114,7 +114,6 @@ void handle_ide_worker_fd(struct socketDetails *sd);
 void handle_find_fd(struct socketDetails *sd);
 void handle_task_fd(struct socketDetails *sd);
 
-// TODO implemented memory conservation
 int main(int argc, char const *argv[]) {
 	setvbuf(stdout, NULL, _IONBF, 0);
 	setvbuf(stderr, NULL, _IONBF, 0);

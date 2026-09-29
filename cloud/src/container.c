@@ -452,7 +452,6 @@ int setup_mode(void *arg) {
 	close(slave_fd);
 }
 
-// TODO add limits to the container
 int terminal_mode(void *arg) {
 	printc(INFO, "container - terminal_mode", "Container started\n");
 	int slave_fd = *(int *)arg;
