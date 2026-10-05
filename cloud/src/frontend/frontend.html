@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<title>CodeArena Frontend</title>
+		<style>
+			body {
+				font-family: system-ui, sans-serif;
+				padding: 20px;
+				background: #1e1e1e;
+				color: #fff;
+			}
+			.file-entry {
+				border: 1px solid #444;
+				padding: 10px;
+				margin-top: 10px;
+				background: #2a2a2a;
+			}
+			input,
+			textarea,
+			button {
+				margin: 5px 0;
+				display: block;
+				width: 300px;
+				background: #333;
+				color: white;
+				border: 1px solid #555;
+				padding: 5px;
+			}
+			textarea {
+				height: 100px;
+			}
+			button {
+				cursor: pointer;
+				background: #007acc;
+				border: none;
+				padding: 10px;
+			}
+			button:hover {
+				background: #005999;
+			}
+		</style>
+	</head>
+	<body>
+		<h2>CodeArena Code Submission</h2>
+
+		<button id="connect-btn">Connect to Gateway</button>
+		<p id="status">Status: Disconnected</p>
+
+		<hr />
+
+		<label for="files">Number of files:</label>
+		<input id="files" name="files" type="number" min="0" max="30" />
+
+		<div id="file-contents"></div>
+
+		<button id="send-btn">Send to Container</button>
+
+		<hr />
+
+		<textarea id="terminal"></textarea>
+
+		<button id="send-cmd-btn">Send to Container</button>
+
+		<!-- The Template (Hidden by default in HTML5) -->
+		<template id="file-details">
+			<div class="file-entry">
+				<label>Filename (e.g., main.c)</label>
+				<input type="text" class="filename" />
+				<label>File Content</label>
+				<textarea class="file-content"></textarea>
+			</div>
+		</template>
+
+		<script>
+			// --- 1. DOM Wiring ---
+			const template = document.querySelector("#file-details"); // Fixed selector
+			const fileContentsDiv = document.querySelector("#file-contents"); // Fixed selector
+			const filesInput = document.querySelector("#files"); // Fixed selector
+			const connectBtn = document.querySelector("#connect-btn");
+			const sendBtn = document.querySelector("#send-btn");
+			const sendCmdBtn = document.querySelector("#send-cmd-btn");
+			const statusText = document.querySelector("#status");
+			const terminal = document.querySelector("#terminal");
+
+			let activeWebSocket = null;
+
+			// Dynamically spawn inputs based on number of files
+			filesInput.addEventListener("input", (e) => {
+				fileContentsDiv.innerHTML = ""; // Clear existing
+				const numFiles = parseInt(e.target.value) || 0;
+
+				// Limit to the 30 files your container backend allows
+				const safeNum = Math.min(numFiles, 30);
+
+				for (let i = 0; i < safeNum; i++) {
+					// Deep clone the template content
+					const clone = template.content.cloneNode(true);
+					fileContentsDiv.appendChild(clone);
+				}
+			});
+
+			// --- 2. Port-Hopping WebSocket Logic ---
+			function huntForGateway(currentPort, maxPort) {
+				if (currentPort > maxPort) {
+					const errorMsg =
+						"Critical Error: Could not connect to any Gateway node on ports 3000-3010.";
+					statusText.innerText = "Status: " + errorMsg;
+					alert(errorMsg);
+					return;
+				}
+
+				statusText.innerText = `Status: Scanning port ${currentPort}...`;
+
+				// Attempt connection
+				const ws = new WebSocket(`ws://localhost:${currentPort}`);
+				ws.binaryType = "arraybuffer";
+
+				ws.onopen = () => {
+					statusText.innerText = `Status: Connected to Gateway on Port ${currentPort}!`;
+					activeWebSocket = ws;
+				};
+
+				ws.onclose = (event) => {
+					// If it wasn't a clean shutdown (e.g., connection refused), try the next port
+					if (!activeWebSocket) {
+						huntForGateway(currentPort + 1, maxPort);
+					} else {
+						statusText.innerText = `Status: Gateway Disconnected!`;
+					}
+				};
+
+				ws.onerror = (error) => {
+					// Browsers suppress raw connection errors for security,
+					// but this will immediately trigger onclose, which handles the hopping.
+					console.error(error);
+				};
+
+				ws.onmessage = (event) => {
+					// This is where your PTY output from the container will arrive!
+					if (event.data instanceof ArrayBuffer) {
+						console.log(
+							"Container says:",
+							new TextDecoder("utf-8").decode(event.data),
+						);
+					} else {
+						console.log("Container says (text):", event.data);
+					}
+				};
+			}
+
+			connectBtn.addEventListener("click", () => {
+				if (activeWebSocket) {
+					activeWebSocket.close();
+					activeWebSocket = null;
+				}
+				huntForGateway(3000, 3010);
+			});
+
+			sendBtn.addEventListener("click", () => {
+				if (
+					!activeWebSocket ||
+					activeWebSocket.readyState !== WebSocket.OPEN
+				)
+					return;
+
+				const entries = document.querySelectorAll(".file-entry");
+				const numFiles = entries.length;
+
+				if (numFiles === 0 || numFiles > 30) {
+					alert("Please provide between 1 and 30 files.");
+					return;
+				}
+
+				const encoder = new TextEncoder(); // Converts JS strings to UTF-8 byte arrays
+				const parsedFiles = [];
+				let totalBytesNeeded = 1; // 1 byte for n_files
+
+				// 1. Pre-calculate the exact buffer size needed (since ArrayBuffers can't easily resize)
+				entries.forEach((entry) => {
+					const nameStr = entry.querySelector(".filename").value;
+					const contentStr =
+						entry.querySelector(".file-content").value;
+
+					const nameBytes = encoder.encode(nameStr);
+					const contentBytes = encoder.encode(contentStr);
+
+					parsedFiles.push({ nameBytes, contentBytes });
+
+					// Add to total: 1 byte (name len) + name bytes + 4 bytes (content len) + content bytes
+					totalBytesNeeded +=
+						1 + nameBytes.length + 4 + contentBytes.length;
+				});
+
+				// 2. "malloc" the raw memory
+				const buffer = new ArrayBuffer(totalBytesNeeded);
+
+				// 3. Create views to write to the memory
+				const view = new DataView(buffer); // For writing integers (uint8, uint32)
+				const uint8View = new Uint8Array(buffer); // For memcopying arrays of bytes
+
+				let offset = 0; // This is your JS version of `buf_ptr`
+
+				// --- PACKING THE C STRUCT ---
+
+				// Write n_files (uint8_t)
+				view.setUint8(offset, numFiles);
+				offset += 1;
+
+				parsedFiles.forEach((file) => {
+					// Write filename_size (uint8_t)
+					view.setUint8(offset, file.nameBytes.length);
+					offset += 1;
+
+					// memcpy the filename string
+					uint8View.set(file.nameBytes, offset);
+					offset += file.nameBytes.length;
+
+					// Write file_size (uint32_t)
+					// IMPORTANT: The 'true' flag forces Little-Endian, matching your x86 C backend!
+					view.setUint32(offset, file.contentBytes.length, true);
+					offset += 4;
+
+					// memcpy the file content
+					uint8View.set(file.contentBytes, offset);
+					offset += file.contentBytes.length;
+				});
+
+				console.log(
+					`Packed ${totalBytesNeeded} bytes. Sending to container...`,
+				);
+
+				// 4. Send the raw memory across the WebSocket
+				activeWebSocket.send(buffer);
+			});
+
+			sendCmdBtn.addEventListener("click", () => {
+				if (
+					!activeWebSocket ||
+					activeWebSocket.readyState !== WebSocket.OPEN
+				)
+					return;
+
+				const encoder = new TextEncoder();
+
+				let str = terminal.value;
+
+				if (str.at(-1) == "\n" && str.at(-2) != "\r") {
+					str = `${str.slice(0, -1)}\r${str.slice(-1)}`;
+				}
+
+				const buffer = encoder.encode(terminal.value);
+
+				activeWebSocket.send(buffer);
+			});
+		</script>
+	</body>
+</html>

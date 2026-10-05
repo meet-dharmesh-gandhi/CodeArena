@@ -1,6 +1,14 @@
+*
+!*.*
+!*/
+!Dockerfile
+
 **ignore**/
+**.ignore**
 *.env
 
 **/.venv/**
-**/node_modules/**
+*.tar.*
+**/*logs*.txt
+*.xlsx
 **/.vscode/**
